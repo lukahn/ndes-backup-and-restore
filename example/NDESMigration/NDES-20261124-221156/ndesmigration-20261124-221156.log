@@ -1,0 +1,23 @@
+NDESMigration on NDES at 2026-11-24T22:11:56.3001565+11:00
+
+== Capturing NDES configuration
+   Source: live server (NDES)
+  [ok]   Registry targets      : HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Cryptography\MSCEP (9 value(s)); HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\ADCS\NDES (1 value(s)); HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\HTTP\Parameters (2 value(s))
+  [ok]   Applications          : /CertSrv/mscep, /CertSrv/mscep_admin
+  [ok]   Features to install   : 44
+  [ok]   CA configuration      : ca.contoso.com\CONTOSO-SUBCA
+  [ok]   CertsInMYStore        : 1
+  [ok]   MaxFieldLength        : 65534
+  [ok]   MaxRequestBytes       : 65534
+  [ok]   ConfigurationStatus   : 2
+  [ok]   RA templates          : encryption=NDESUser, signing=NDESUser
+  [ok]   Service account       : CONTOSO\svc_ndes
+  [ok]   Bindings              : http *:80:, https *:443:
+  [ok]   Bundle                : C:\NDESMigration\NDES-20261124-221156\ndes-config.json
+  [warn] MSCEP EncryptionTemplate = 'NDESUser' is NOT machine-capable, so a restore cannot re-enrol it into the machine store.
+  [warn] Use a template whose AD flags carry 0x40 (CEPEncryption, MachineEnrollmentAgent) and pass it with -RAEncryptionTemplate / -RASigningTemplate at restore time.
+  [warn] MSCEP SignatureTemplate = 'NDESUser' is NOT machine-capable, so a restore cannot re-enrol it into the machine store.
+  [warn] Use a template whose AD flags carry 0x40 (CEPEncryption, MachineEnrollmentAgent) and pass it with -RAEncryptionTemplate / -RASigningTemplate at restore time.
+
+== Backup complete
+   Restore on the target with:  .\NDESMigration.ps1 -Restore -Path 'C:\NDESMigration\NDES-20261124-221156'

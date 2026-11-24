@@ -17,6 +17,12 @@ NDESMigration-latest/
 **/ndes-config.json
 **/ndesmigration-*.log
 
+# One exception: example/ holds a redacted sample bundle and the log -Backup
+# produced from it, so the file shape is visible without publishing a real one.
+# Hostnames, accounts and thumbprints in it are placeholders.
+!example/**
+!example/NDESMigration/**
+
 # The capture kit's own lab notes (sanitised copies live in docs/)
 AD-CA.txt
 AD-NDES.txt

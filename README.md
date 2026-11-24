@@ -16,10 +16,13 @@ bundle — with the evidence for every decision recorded in this repository.
 | `migration/` | `NDESMigration.ps1` (`-Backup` / `-Restore` / `-Verify`), `Get-TemplateFlags.ps1`, `Diagnose-Ndes503.ps1` |
 | `test/` | `Test-NdesEnrollment.ps1` — a real SCEP enrolment over HTTP and HTTPS, using only inbox Windows code |
 | `docs/` | Working notes from the lab that produced this, with hostnames and accounts replaced by placeholders |
+| `example/` | A redacted bundle plus the log `-Backup` wrote for it, so the file shape is visible without publishing a real one |
 
 Capture output, bundles and logs are deliberately not published — see
 [`.gitignore`](./.gitignore). They contain registry exports, account names and
-certificate thumbprints, and they are large.
+certificate thumbprints, and they are large. The one exception is
+[`example/`](./example): a single bundle with the hostnames, accounts and
+thumbprints replaced by placeholders.
 
 Target platform: **Windows Server 2019**, Windows PowerShell 5.1. No modules to
 install beyond what ships with the role.

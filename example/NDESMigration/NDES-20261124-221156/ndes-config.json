@@ -1,0 +1,309 @@
+{
+    "SchemaVersion":  3,
+    "SourceHost":  "NDES",
+    "CapturedUtc":  "2026-11-24T11:11:56.3473866Z",
+    "CapturedFrom":  "live",
+    "Registry":  [
+                     {
+                         "Key":  "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Cryptography\\MSCEP",
+                         "Mode":  "Tree",
+                         "Values":  [
+                                        {
+                                            "Path":  "",
+                                            "Name":  "SignatureTemplate",
+                                            "Kind":  "String",
+                                            "Value":  "NDESUser"
+                                        },
+                                        {
+                                            "Path":  "",
+                                            "Name":  "EncryptionTemplate",
+                                            "Kind":  "String",
+                                            "Value":  "NDESUser"
+                                        },
+                                        {
+                                            "Path":  "",
+                                            "Name":  "GeneralPurposeTemplate",
+                                            "Kind":  "String",
+                                            "Value":  "NDESUser"
+                                        },
+                                        {
+                                            "Path":  "CAInfo",
+                                            "Name":  "Configuration",
+                                            "Kind":  "String",
+                                            "Value":  "ca.contoso.com\\CONTOSO-SUBCA"
+                                        },
+                                        {
+                                            "Path":  "CAType",
+                                            "Name":  "CAType",
+                                            "Kind":  "DWord",
+                                            "Value":  1
+                                        },
+                                        {
+                                            "Path":  "CertsInMYStore",
+                                            "Name":  "CertsInMYStore",
+                                            "Kind":  "DWord",
+                                            "Value":  1
+                                        },
+                                        {
+                                            "Path":  "EnforcePassword",
+                                            "Name":  "EnforcePassword",
+                                            "Kind":  "DWord",
+                                            "Value":  1
+                                        },
+                                        {
+                                            "Path":  "PasswordVDir",
+                                            "Name":  "PasswordVDir",
+                                            "Kind":  "String",
+                                            "Value":  "CertSrv/mscep_admin"
+                                        },
+                                        {
+                                            "Path":  "UseSinglePassword",
+                                            "Name":  "UseSinglePassword",
+                                            "Kind":  "DWord",
+                                            "Value":  0
+                                        }
+                                    ]
+                     },
+                     {
+                         "Key":  "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\ADCS\\NDES",
+                         "Mode":  "Tree",
+                         "Values":  [
+                                        {
+                                            "Path":  "",
+                                            "Name":  "ConfigurationStatus",
+                                            "Kind":  "DWord",
+                                            "Value":  2
+                                        }
+                                    ]
+                     },
+                     {
+                         "Key":  "HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\HTTP\\Parameters",
+                         "Mode":  "Selected",
+                         "Values":  [
+                                        {
+                                            "Path":  "",
+                                            "Name":  "MaxFieldLength",
+                                            "Kind":  "DWord",
+                                            "Value":  65534
+                                        },
+                                        {
+                                            "Path":  "",
+                                            "Name":  "MaxRequestBytes",
+                                            "Kind":  "DWord",
+                                            "Value":  65534
+                                        }
+                                    ]
+                     }
+                 ],
+    "Mscep":  [
+                  {
+                      "Path":  "",
+                      "Name":  "SignatureTemplate",
+                      "Kind":  "String",
+                      "Value":  "NDESUser"
+                  },
+                  {
+                      "Path":  "",
+                      "Name":  "EncryptionTemplate",
+                      "Kind":  "String",
+                      "Value":  "NDESUser"
+                  },
+                  {
+                      "Path":  "",
+                      "Name":  "GeneralPurposeTemplate",
+                      "Kind":  "String",
+                      "Value":  "NDESUser"
+                  },
+                  {
+                      "Path":  "CAInfo",
+                      "Name":  "Configuration",
+                      "Kind":  "String",
+                      "Value":  "ca.contoso.com\\CONTOSO-SUBCA"
+                  },
+                  {
+                      "Path":  "CAType",
+                      "Name":  "CAType",
+                      "Kind":  "DWord",
+                      "Value":  1
+                  },
+                  {
+                      "Path":  "CertsInMYStore",
+                      "Name":  "CertsInMYStore",
+                      "Kind":  "DWord",
+                      "Value":  1
+                  },
+                  {
+                      "Path":  "EnforcePassword",
+                      "Name":  "EnforcePassword",
+                      "Kind":  "DWord",
+                      "Value":  1
+                  },
+                  {
+                      "Path":  "PasswordVDir",
+                      "Name":  "PasswordVDir",
+                      "Kind":  "String",
+                      "Value":  "CertSrv/mscep_admin"
+                  },
+                  {
+                      "Path":  "UseSinglePassword",
+                      "Name":  "UseSinglePassword",
+                      "Kind":  "DWord",
+                      "Value":  0
+                  }
+              ],
+    "AppPool":  {
+                    "Name":  "SCEP",
+                    "ManagedRuntimeVersion":  "v4.0",
+                    "ManagedPipelineMode":  "Integrated",
+                    "IdentityType":  "SpecificUser",
+                    "UserName":  "CONTOSO\\svc_ndes"
+                },
+    "Applications":  [
+                         {
+                             "Path":  "/CertSrv/mscep",
+                             "PhysicalPath":  "C:\\Windows\\System32\\CertSrv\\mscep",
+                             "AppPool":  "SCEP",
+                             "Anonymous":  true,
+                             "Windows":  true,
+                             "AccessPolicy":  "Read, Execute",
+                             "AllowDoubleEscaping":  true,
+                             "MaxQueryString":  65536,
+                             "DirectoryBrowse":  false,
+                             "DefaultDocuments":  [
+                                                      "mscep.dll"
+                                                  ]
+                         },
+                         {
+                             "Path":  "/CertSrv/mscep_admin",
+                             "PhysicalPath":  "C:\\Windows\\System32\\CertSrv\\mscep",
+                             "AppPool":  "SCEP",
+                             "Anonymous":  false,
+                             "Windows":  true,
+                             "AccessPolicy":  "Read, Execute",
+                             "AllowDoubleEscaping":  true,
+                             "MaxQueryString":  65536,
+                             "DirectoryBrowse":  false,
+                             "DefaultDocuments":  [
+                                                      "mscep.dll"
+                                                  ]
+                         }
+                     ],
+    "Bindings":  [
+                     {
+                         "Protocol":  "http",
+                         "Information":  "*:80:"
+                     },
+                     {
+                         "Protocol":  "https",
+                         "Information":  "*:443:"
+                     }
+                 ],
+    "Authentication":  [
+                           {
+                               "Path":  "/CertSrv/mscep",
+                               "Anonymous":  true,
+                               "Windows":  true
+                           },
+                           {
+                               "Path":  "/CertSrv/mscep_admin",
+                               "Anonymous":  false,
+                               "Windows":  true
+                           }
+                       ],
+    "Features":  [
+                     "AD-Certificate",
+                     "ADCS-Device-Enrollment",
+                     "Web-Server",
+                     "Web-WebServer",
+                     "Web-Common-Http",
+                     "Web-Default-Doc",
+                     "Web-Dir-Browsing",
+                     "Web-Http-Errors",
+                     "Web-Static-Content",
+                     "Web-Http-Redirect",
+                     "Web-Health",
+                     "Web-Http-Logging",
+                     "Web-Log-Libraries",
+                     "Web-Request-Monitor",
+                     "Web-Http-Tracing",
+                     "Web-Performance",
+                     "Web-Stat-Compression",
+                     "Web-Security",
+                     "Web-Filtering",
+                     "Web-Windows-Auth",
+                     "Web-App-Dev",
+                     "Web-Net-Ext",
+                     "Web-Net-Ext45",
+                     "Web-Asp-Net45",
+                     "Web-ISAPI-Ext",
+                     "Web-ISAPI-Filter",
+                     "Web-Mgmt-Tools",
+                     "Web-Mgmt-Console",
+                     "Web-Mgmt-Compat",
+                     "Web-Metabase",
+                     "Web-WMI",
+                     "NET-Framework-Features",
+                     "NET-Framework-Core",
+                     "NET-HTTP-Activation",
+                     "NET-Framework-45-Features",
+                     "NET-Framework-45-Core",
+                     "NET-Framework-45-ASPNET",
+                     "NET-WCF-Services45",
+                     "NET-WCF-HTTP-Activation45",
+                     "NET-WCF-TCP-PortSharing45",
+                     "WAS",
+                     "WAS-Process-Model",
+                     "WAS-NET-Environment",
+                     "WAS-Config-APIs"
+                 ],
+    "Certificates":  [
+                         {
+                             "Subject":  "CN=NDES-MSCEP-RA, C=AU",
+                             "Thumbprint":  "4F2A9C1E8B7D6350A1C2E9F4B8D756301C4E2A9F",
+                             "Issuer":  "CN=CONTOSO-SUBCA, DC=contoso, DC=com",
+                             "NotAfter":  "2028-11-21T10:11:09.0000000Z",
+                             "FriendlyName":  "",
+                             "HasPrivateKey":  true
+                         },
+                         {
+                             "Subject":  "CN=ndes, CN=ndes.contoso.com",
+                             "Thumbprint":  "8C1D4A7F2E9B6503D8A1C4F7B2E956308D1C4A7F",
+                             "Issuer":  "CN=CONTOSO-SUBCA, DC=contoso, DC=com",
+                             "NotAfter":  "2028-11-21T10:11:09.0000000Z",
+                             "FriendlyName":  "NDES web server cert",
+                             "HasPrivateKey":  true
+                         },
+                         {
+                             "Subject":  "CN=NDES-MSCEP-RA, C=AU",
+                             "Thumbprint":  "2E7B9D4F1A8C6350B4D7F2A9E1C85630A7D4F1B9",
+                             "Issuer":  "CN=CONTOSO-SUBCA, DC=contoso, DC=com",
+                             "NotAfter":  "2028-11-21T10:11:09.0000000Z",
+                             "FriendlyName":  "",
+                             "HasPrivateKey":  true
+                         }
+                     ],
+    "LocalGroups":  [
+                        {
+                            "Name":  "IIS_IUSRS",
+                            "Members":  [
+                                            "CONTOSO\\svc_ndes"
+                                        ]
+                        },
+                        {
+                            "Name":  "Administrators",
+                            "Members":  [
+                                            "CONTOSO\\da",
+                                            "CONTOSO\\Domain Admins",
+                                            "CONTOSO\\ea",
+                                            "CONTOSO\\GG-Server-Admins",
+                                            "CONTOSO\\svc_ndes",
+                                            "NDES\\Administrator"
+                                        ]
+                        }
+                    ],
+    "RAEncryptionTemplate":  "NDESUser",
+    "RASigningTemplate":  "NDESUser",
+    "ServerCertificateTemplate":  "NDESServer",
+    "RACertificateSubject":  "CN=NDES-MSCEP-RA, C=AU",
+    "ServerCertificateSubject":  "CN=ndes, CN=ndes.contoso.com"
+}
