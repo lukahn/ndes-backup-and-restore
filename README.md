@@ -448,20 +448,35 @@ You are prompted to confirm, each defaulting to the backed-up value:
 then for the service account password, which is used only to set the app pool
 identity and is never written to disk.
 
-### RA templates must match the MSCEP values
+### All three MSCEP template values must be the wizard's
 
-With `CertsInMYStore = 1`, NDES finds its RA certificates **by template name**.
-The restore therefore enrols from whatever MSCEP `EncryptionTemplate` and
-`SignatureTemplate` say, and if you override either prompt it writes the new name
-back into MSCEP in the same run — the certificate and the value can't drift
-apart.
+`-RAEncryptionTemplate` and `-RASigningTemplate` decide which templates the RA
+certificates are **enrolled from**. They are never written into MSCEP.
 
-The direction matters, and the two are easy to swap:
+Instead the restore copies `GeneralPurposeTemplate` — the value the wizard wrote,
+`NDESUser` on a normal build — over `EncryptionTemplate` and `SignatureTemplate`,
+so all three agree:
+
+```
+MSCEP\EncryptionTemplate     = NDESUser
+MSCEP\SignatureTemplate      = NDESUser
+MSCEP\GeneralPurposeTemplate = NDESUser
+```
+
+A server whose `EncryptionTemplate`/`SignatureTemplate` name the templates the RA
+certificates were actually issued from answers every SCEP request with
+`You do not have sufficient permission to enroll with SCEP` — with both RA
+certificates present, valid and readable, and `GetCACaps`/`GetCACert` answering
+normally. Tested both ways on the same server. The comparison and `-FixDrift` use
+the same rule, so a target left in the broken state shows two `Registry` rows and
+is offered the repair.
+
+The direction of the two enrolment templates matters, and they are easy to swap:
 
 | MSCEP value | Certificate | Default template |
 | --- | --- | --- |
 | `EncryptionTemplate` | encrypts the SCEP challenge | `CEPEncryption` (CEP Encryption) |
-| `SignatureTemplate` | signs requests to the CA | `EnrollmentAgent` (**Enrollment Agent**, computer) |
+| `SignatureTemplate` | signs requests to the CA | `MachineEnrollmentAgent` (Machine Enrollment Agent) |
 
 The signing role needs the **computer** enrollment agent template.
 `EnrollmentAgentOffline` — "Exchange Enrollment Agent (Offline request)" — is the
@@ -658,7 +673,7 @@ It is also run automatically at the start of every restore (skip it with
 | Host | elevated, OS version, domain-joined, PKI module, IIS present |
 | Directory | LDAP reachable, computer account exists and is enabled, service account exists and is enabled, service account password (LDAP bind), not a local admin |
 | CA | CA host resolves, RPC 135 reachable, `certutil -ping` against the config string, each template published on the CA (`certutil -CATemplates`) |
-| CA (advisory) | template enrol ACL evaluated for the **computer account** using its flattened group SIDs (`tokenGroups`) |
+| CA (advisory) | template enrol ACL evaluated for the identity that will actually enrol — the **computer account** using its flattened group SIDs (`tokenGroups`), or the service account when a CEP endpoint and credential are supplied. If the computer account has no Enroll ACE, the service account is evaluated as well, because the machine path retries as that account |
 
 The ACL check resolves rights by name from AD's own `CN=Extended-Rights`
 container rather than assuming GUIDs, honours explicit denies, and treats
@@ -688,9 +703,15 @@ revert — fix the cause and run it again.
 ### Prerequisites on the target
 
 - Domain-joined, and running elevated.
-- The **service account** needs Read + Enroll on the RA templates the restore
-  uses, and Request Certificates on the CA — normally already true on a server
-  built by the NDES wizard.
+- The **computer account** (`SERVER$`) needs Read + Enroll on the RA templates the
+  restore enrols from, since it requests them in machine context — unless you pass
+  a CEP endpoint and credential, in which case it is the **service account** that
+  does. A template that grants Enroll to the service account but not to the
+  servers is the classic cause of `You do not have sufficient permission to enroll
+  with SCEP`: the encryption certificate is never issued, and every request that
+  needs it fails. `-Preflight` evaluates the template ACL for whichever identity
+  will actually be used. Request Certificates on the CA is still needed for the
+  service account.
 - The restoring account needs local Administrator and Request Certificates on
   the CA, since it writes the private keys into the machine store. It does **not**
   need Enterprise Admin, Domain Admin, or any rights on the service account's AD

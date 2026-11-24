@@ -59,12 +59,13 @@
 
 .PARAMETER RASigningTemplate
     With -Restore: template for the RA signing certificate. Defaults to the
-    recorded MSCEP SignatureTemplate, which is what NDES will look for. Whatever
-    you choose is also written to MSCEP, so the two cannot disagree.
+    recorded MSCEP SignatureTemplate. It selects what to enrol and is never
+    written to MSCEP - the three MSCEP template values are all set to the
+    bundle's GeneralPurposeTemplate, which is what NDES needs.
 
 .PARAMETER RAEncryptionTemplate
     With -Restore: template for the RA encryption certificate. Defaults to the
-    recorded MSCEP EncryptionTemplate.
+    recorded MSCEP EncryptionTemplate. Enrolment only, like -RASigningTemplate.
 
 .PARAMETER EnrollmentPolicyUrl
     With -Restore: force alternate-credential enrolment through a certificate
@@ -457,11 +458,12 @@ $script:RegistryTargets = @(
     [pscustomobject]@{ Key = 'HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\HTTP\Parameters'; Mode = 'Selected'; Values = @('MaxFieldLength', 'MaxRequestBytes') }
 )
 
-# NDES locates its RA certificates by template name when CertsInMYStore = 1, so
-# these must match the MSCEP SignatureTemplate/EncryptionTemplate values written
-# to the registry. They are only fallbacks: whatever the source server recorded
-# always wins. Note the direction - CEP Encryption is the ENCRYPTION template and
-# Exchange Enrollment Agent (Offline request) is the SIGNING template.
+# The templates -Restore enrols the RA certificates from. These are never written
+# to the MSCEP template values: the wizard puts the same name in all three there
+# (NDESUser), and NDES refuses every request if they name the templates the
+# certificates were enrolled from. Note the direction - CEP Encryption is the
+# ENCRYPTION template and Exchange Enrollment Agent (Offline request) is the
+# SIGNING template.
 $script:DefaultEncryptionTemplate = 'CEPEncryption'
 # Machine-capable enrollment agent template. Verified against this lab: templates
 # whose 'flags' attribute carries 0x40 (machine type) accept NDES$ requests;
@@ -1416,37 +1418,24 @@ function Get-MscepValue {
     return $null
 }
 
-function Set-RaTemplateValue {
+function Set-MscepTargetValue {
     <#
-        Forces an MSCEP template value onto the registry targets that will be
-        written. NDES locates its RA certificates by template name when
-        CertsInMYStore = 1, so the value and the certificate must never disagree.
+        Sets one value on the MSCEP registry targets that will be written. Only for
+        values the target environment decides rather than the source - the template
+        names, which have to agree with each other.
     #>
     param(
         [Parameter(Mandatory)][AllowEmptyCollection()]$Targets,
-        [Parameter(Mandatory)][string]$MscepValue,
-        [Parameter(Mandatory)][string]$Name
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$Value
     )
 
-    $applied = $false
     foreach ($target in @($Targets)) {
         if ($target.Key -notmatch '\\Cryptography\\MSCEP$') { continue }
-
-        $entry = @($target.Values) | Where-Object { $_.Name -eq $MscepValue } | Select-Object -First 1
-        if ($entry) {
-            if ([string]$entry.Value -ne $Name) {
-                Write-Info ("{0}: '{1}' -> '{2}' (matches the certificate that will be enrolled)" -f $MscepValue, $entry.Value, $Name) 'Warn'
-                $entry.Value = $Name
-            }
-        }
-        else {
-            $target.Values += [pscustomobject]@{ Path = ''; Name = $MscepValue; Kind = 'String'; Value = $Name }
-            Write-Info ("{0} added: '{1}'" -f $MscepValue, $Name) 'Warn'
-        }
-        $applied = $true
+        $entry = @($target.Values) | Where-Object { $_.Name -eq $Name } | Select-Object -First 1
+        if ($entry) { $entry.Value = $Value }
+        else { $target.Values += [pscustomobject]@{ Path = ''; Name = $Name; Kind = 'String'; Value = $Value } }
     }
-
-    if (-not $applied) { Write-Info ("{0} could not be set: the bundle has no MSCEP target" -f $MscepValue) 'Warn' }
 }
 
 # ------------------------------------------------------------------- backup ---
@@ -1804,6 +1793,8 @@ function Invoke-Preflight {
 
     $results = New-Object System.Collections.Generic.List[object]
     $serviceAccountDn = $null
+    $computerDn = $null
+    $computerSam = $env:COMPUTERNAME + '$'
     $add = {
         param($phase, $check, $outcome, $detail)
         [void]$results.Add((New-PreflightResult -Phase $phase -Check $check -Result $outcome -Detail $detail))
@@ -1839,12 +1830,12 @@ function Invoke-Preflight {
         & $add 'Directory' 'LDAP reachable' 'Pass' $naming.Default
 
         # the machine account is what actually requests the RA certificates
-        $computerSam = $env:COMPUTERNAME + '$'
         try {
             $computer = Find-DirectoryObject -Base $naming.Default `
                 -Filter ("(&(objectClass=computer)(sAMAccountName={0}))" -f (ConvertTo-LdapFilterValue $computerSam)) `
                 -Properties @('distinguishedName', 'userAccountControl')
             if ($computer) {
+                $computerDn = [string]$computer.Properties['distinguishedName'][0]
                 $uac = [int](Get-ResultFirstProperty -SearchResult $computer -Name 'userAccountControl')
                 if (($uac -band 0x2) -ne 0) { & $add 'Directory' 'Computer account enabled' 'Fail' ("{0} is disabled" -f $computerSam) }
                 else { & $add 'Directory' 'Computer account enabled' 'Pass' ([string]$computer.Properties['distinguishedName'][0]) }
@@ -1986,23 +1977,47 @@ function Invoke-Preflight {
     }
     catch { & $add 'CA' 'Published templates list' 'NotChecked' $_.Exception.Message }
 
-    # Advisory ACL evaluation. The identity that matters is the SERVICE ACCOUNT -
-    # that is the account NDES requests its RA certificates as, and the account
-    # the RA templates are normally ACL'd to.
+    # Advisory ACL evaluation. The identity that matters is the one the CA will see
+    # on the request, which is decided by Install-NdesRaCertificates:
+    #   machine context (the normal path) -> the COMPUTER account, NDES$
+    #   CEP endpoint plus a credential    -> the service account
+    # Checking only the service account hides the failure that actually happens -
+    # a template that grants Enroll to the service account and not to the servers,
+    # so the request is refused and the resulting mscep_admin page says
+    # "You do not have sufficient permission to enroll with SCEP".
     if ($naming -and $computerSystem -and $computerSystem.PartOfDomain) {
         try {
             $extendedRights = Get-ExtendedRightNames -ConfigurationNamingContext $naming.Configuration
 
-            if ($serviceAccountDn) {
-                & $add 'CA' 'Enrolling identity for RA certificates' 'Pass' ("{0} (the service account)" -f $Account)
-                $sidSet = @(Get-DirectorySidSet -DistinguishedName $serviceAccountDn)
+            $useCep = [bool]($EnrollmentPolicyUrl -and $Credential)
+            if ($useCep) { $enrollingName = $Account; $enrollingDn = $serviceAccountDn }
+            else { $enrollingName = ('{0} (computer account)' -f $computerSam); $enrollingDn = $computerDn }
+
+            if ($enrollingDn) {
+                & $add 'CA' 'Identity enrolling the RA certificates' 'Pass' $enrollingName
+                $sidSet = @(Get-DirectorySidSet -DistinguishedName $enrollingDn)
+                $deniedTemplates = @()
                 foreach ($template in @($EncryptionTemplate, $SigningTemplate) | Select-Object -Unique) {
-                    $results.Add((Get-PreflightTemplateCheck -Template $template -SidName $Account `
-                                -SidSet $sidSet -ExtendedRights $extendedRights -ConfigurationNamingContext $naming.Configuration))
+                    $check = Get-PreflightTemplateCheck -Template $template -SidName $enrollingName `
+                        -SidSet $sidSet -ExtendedRights $extendedRights -ConfigurationNamingContext $naming.Configuration
+                    $results.Add($check)
+                    if ($check.Result -eq 'Warn') { $deniedTemplates += $template }
+                }
+
+                # A machine request against a user-only template falls back to
+                # submitting the same request as the service account, so when the
+                # computer account has no Enroll ACE it is worth knowing whether that
+                # fallback can succeed instead of failing at the CA.
+                if ($deniedTemplates.Count -gt 0 -and -not $useCep -and $serviceAccountDn) {
+                    $serviceSids = @(Get-DirectorySidSet -DistinguishedName $serviceAccountDn)
+                    foreach ($template in $deniedTemplates) {
+                        $results.Add((Get-PreflightTemplateCheck -Template $template -SidName ('{0} (fallback identity)' -f $Account) `
+                                    -SidSet $serviceSids -ExtendedRights $extendedRights -ConfigurationNamingContext $naming.Configuration))
+                    }
                 }
             }
             else {
-                & $add 'CA' 'RA template enrol ACL (advisory)' 'NotChecked' 'service account not found in the directory, so its ACEs cannot be evaluated'
+                & $add 'CA' 'RA template enrol ACL (advisory)' 'NotChecked' ("{0} not found in the directory, so its ACEs cannot be evaluated" -f $enrollingName)
             }
         }
         catch { & $add 'CA' 'RA template enrol ACL (advisory)' 'NotChecked' $_.Exception.Message }
@@ -3984,8 +3999,7 @@ function Invoke-Restore {
     # ask for credentials - the comparison needs none.
     if ($Verify) {
         Write-Step 'Verify only - nothing will be changed'
-        $verified = Compare-NdesTargetToBundle -Config $config -Account $account -CAConfig $caConfig `
-            -EncryptionTemplate $raEncryption -SigningTemplate $raSigning
+        $verified = Compare-NdesTargetToBundle -Config $config -Account $account -CAConfig $caConfig
         Write-Step 'Summary'
         if ($verified -eq 0) { Write-Info 'This server matches the bundle.' 'Ok' }
         else { Write-Info ("{0} difference(s) - see the list above." -f $verified) 'Warn' }
@@ -4012,9 +4026,9 @@ function Invoke-Restore {
     Write-Info ("Service account can log on for IIS: {0}" -f $account) 'Ok'
 
     # --- registry targets: build now, write in step 4 ----------------------
-    # Doing this before the certificates matters: NDES finds its RA certificates
-    # by template name (CertsInMYStore = 1), so the certificates must come from
-    # the very templates these values name.
+    # Doing this before the certificates matters: the certificates must come from
+    # the templates -RAEncryptionTemplate / -RASigningTemplate name, and the
+    # registry is corrected to the wizard's own values further down.
     $targets = @(Get-BundleRegistryTargets -Config $config | ForEach-Object {
             [pscustomobject]@{
                 Key    = [string]$_.Key
@@ -4035,14 +4049,28 @@ function Invoke-Restore {
         throw ("The bundle has no MSCEP registry values ({0} was never written), so NDES would have no configuration." -f $script:MSCEPKeyNative)
     }
 
-    # RA templates: pin them into the MSCEP values that will be written, so the
-    # service and its certificates always agree.
-    Set-RaTemplateValue -Targets $targets -MscepValue 'EncryptionTemplate' -Name $raEncryption
-    Set-RaTemplateValue -Targets $targets -MscepValue 'SignatureTemplate' -Name $raSigning
+    # The wizard writes the same template name into all three MSCEP values, and
+    # NDES wants them that way: a server whose EncryptionTemplate/SignatureTemplate
+    # name the templates the RA certificates were enrolled from answers every
+    # request with "You do not have sufficient permission to enroll with SCEP",
+    # with both certificates present and valid. GeneralPurposeTemplate is the one
+    # that keeps the wizard's value, so it is the source for the other two.
+    $generalPurposeTemplate = [string](Get-MscepValue -Config $config -Name 'GeneralPurposeTemplate')
+    if ($generalPurposeTemplate) {
+        Set-MscepTargetValue -Targets $targets -Name 'EncryptionTemplate' -Value $generalPurposeTemplate
+        Set-MscepTargetValue -Targets $targets -Name 'SignatureTemplate' -Value $generalPurposeTemplate
+    }
+    else {
+        Write-Info 'The bundle has no MSCEP GeneralPurposeTemplate, so the other two template values are restored as captured.' 'Warn'
+    }
 
     Write-Info ("Service account : {0}" -f $account)
     Write-Info ("CA configuration: {0}" -f $caConfig)
-    Write-Info ("RA templates    : encryption={0}, signing={1}" -f $raEncryption, $raSigning)
+    Write-Info ("RA enrolment    : encryption={0}, signing={1}" -f $raEncryption, $raSigning)
+    if ($generalPurposeTemplate) {
+        Write-Info ("MSCEP templates : encryption={0}, signing={1}, general={2}" -f `
+                $generalPurposeTemplate, $generalPurposeTemplate, $generalPurposeTemplate)
+    }
     Write-Info ("Policy endpoint : {0}" -f $policyUrl)
     Write-Info ("Server template : {0}" -f $serverTemplate)
     Write-Info ("Server FQDN     : {0}" -f $dnsName)
@@ -4184,16 +4212,14 @@ function Invoke-Restore {
         CAConfig          = $caConfig
     }
 
-    $drift = Compare-NdesTargetToBundle -Config $config -Account $account -CAConfig $caConfig `
-        -EncryptionTemplate $raEncryption -SigningTemplate $raSigning
+    $drift = Compare-NdesTargetToBundle -Config $config -Account $account -CAConfig $caConfig
 
     if ($drift -gt 0) {
         Write-Step 'Repairing the differences'
         $applied = @(Invoke-DriftRemediation -Rows @($script:DriftReport) -Context $remedy -Auto:$FixDrift)
         if ($applied.Count -gt 0) {
             Write-Step 'Re-checking after the repair'
-            $drift = Compare-NdesTargetToBundle -Config $config -Account $account -CAConfig $caConfig `
-                -EncryptionTemplate $raEncryption -SigningTemplate $raSigning
+            $drift = Compare-NdesTargetToBundle -Config $config -Account $account -CAConfig $caConfig
         }
     }
 
@@ -4314,8 +4340,6 @@ function Compare-NdesTargetToBundle {
         [Parameter(Mandatory)]$Config,
         [string]$Account,
         [string]$CAConfig,
-        [string]$EncryptionTemplate,
-        [string]$SigningTemplate,
         [string]$AppHostPath
     )
 
@@ -4323,6 +4347,7 @@ function Compare-NdesTargetToBundle {
 
     $rows = New-Object System.Collections.Generic.List[object]
     $appHost = if ($AppHostPath) { $AppHostPath } else { Join-Path $env:SystemRoot 'System32\inetsrv\config\applicationHost.config' }
+    $generalPurposeTemplate = [string](Get-MscepValue -Config $Config -Name 'GeneralPurposeTemplate')
 
     # --- registry: every value the bundle recorded --------------------------
     foreach ($target in @($script:RegistryTargets)) {
@@ -4334,13 +4359,16 @@ function Compare-NdesTargetToBundle {
             $label = if ($value.Path) { '{0}\{1}' -f $value.Path, $value.Name } else { $value.Name }
             $found = $live | Where-Object { $_.Name -eq $value.Name -and ([string]$_.Path) -eq ([string]$value.Path) } | Select-Object -First 1
 
-            # A few values are environment-specific on purpose: the CA differs per
-            # site, and the RA templates are the ones this restore enrolled.
+            # The CA differs per site. The three template values must all equal
+            # GeneralPurposeTemplate - that is what the restore writes, and a target
+            # whose EncryptionTemplate/SignatureTemplate name the enrolment
+            # templates is the difference that breaks SCEP.
             $expected = [string]$value.Value
             if ($target.Key -match '\\Cryptography\\MSCEP$') {
                 if ($value.Name -eq 'Configuration' -and $CAConfig) { $expected = $CAConfig }
-                if ($value.Name -eq 'EncryptionTemplate' -and $EncryptionTemplate) { $expected = $EncryptionTemplate }
-                if ($value.Name -eq 'SignatureTemplate' -and $SigningTemplate) { $expected = $SigningTemplate }
+                if ($generalPurposeTemplate -and ($value.Name -eq 'EncryptionTemplate' -or $value.Name -eq 'SignatureTemplate')) {
+                    $expected = $generalPurposeTemplate
+                }
             }
 
             $actual = if ($found) { [string]$found.Value } else { '' }
@@ -4916,10 +4944,10 @@ function Write-MscepAdminHint {
     Write-Info 'Checks, in the order they usually matter:' 'Warn'
     Write-Info '  1. The CALLER must be a local Administrator on the NDES server (mscep_admin mints passwords only for administrators).' 'Warn'
     Write-Info ('     whoami /groups | findstr /i "S-1-5-32-544"   -- on the account you are authenticating as') 'Warn'
-    Write-Info '  2. NDES must be able to read its RA certificates: CertsInMYStore=1 finds them by TEMPLATE NAME, so the certs must' 'Warn'
-    Write-Info '     have been enrolled from the templates in MSCEP SignatureTemplate/EncryptionTemplate, and the app pool identity' 'Warn'
-    Write-Info '     must have Read on their private keys.' 'Warn'
+    Write-Info '  2. NDES must be able to read its RA certificates, and they must both exist: one signing (Certificate Request Agent EKU)' 'Warn'
+    Write-Info '     and one encryption. The app pool identity needs Read on their private keys.' 'Warn'
     Write-Info ('     Get-ChildItem Cert:\LocalMachine\My | Where Subject -match "MSCEP-RA" | Select Subject,Thumbprint,HasPrivateKey') 'Warn'
+    Write-Info '     MSCEP EncryptionTemplate/SignatureTemplate are NOT what picks these up: on a working server they still say NDESUser.' 'Warn'
     Write-Info '  3. The service account needs "Request Certificates" on the CA, and the CA must be reachable from this server.' 'Warn'
 
     # @() around the call: a single event comes back unwrapped, and under
@@ -5029,9 +5057,7 @@ function Test-NdesConfiguration {
 
     # Remaining registry targets (ADCS\NDES, HTTP\Parameters) must read back
     # exactly as captured. Configuration is excluded - it is deliberately
-    # replaced with the target's own CA. The effective values written this run
-    # are used, not the bundle's, so an overridden template name is not reported
-    # as a mismatch.
+    # replaced with the target's own CA.
     if ($Targets) {
         foreach ($target in @($Targets)) {
             $psPath = ConvertTo-PSPath -Key $target.Key
