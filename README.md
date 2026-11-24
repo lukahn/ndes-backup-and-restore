@@ -1,5 +1,11 @@
 # NDES lab capture kit
 
+> **AI disclosure** — the code here was written with AI. I drove every step and
+> did the testing: each script was run against real Active Directory, CA and NDES
+> servers, and the failures and dead ends recorded in this README are ones I hit
+> and worked through. It has not been independently audited, so read the code
+> before relying on it.
+
 Instrumentation for measuring **exactly what an NDES install changes** across an
 AD / CA / NDES lab, and for rebuilding that install on another server from a
 bundle — with the evidence for every decision recorded in this repository.
