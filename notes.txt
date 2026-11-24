@@ -1,0 +1,21 @@
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+
+.\NDESMigration.ps1 -Backup
+
+.\NDESMigration.ps1 -Restore -Path C:\NDESMigration\NDES-20261124-221156 -RAEncryptionTemplate CEPEncryption -RASigningTemplate MachineEnrollmentAgent -SkipPreFlight
+
+---
+.\Start-NdesCapture.ps1 -Label ndes
+
+.\Stop-NdesCapture.ps1 -Label ndes
+
+.\Compare-NdesCapture.ps1 -Label ndes
+---
+
+
+.\Test-NdesEnrollment.ps1 -Server ndes.lukahn.internal
+
+
+Extra setup when migrating:
+-Ensure you have Enrollment Agent (Computer) available, and the service account with read and enroll
+-Same for CEPEncryption
