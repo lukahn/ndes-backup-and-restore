@@ -1,0 +1,44 @@
+# ---------------------------------------------------------------------------
+# Everything here is deliberately NOT published. The value of this repository is
+# the scripts; the captures and bundles they produce are large, machine-specific,
+# and contain registry exports, account names and certificate thumbprints.
+# ---------------------------------------------------------------------------
+
+# Capture output and comparison reports
+NdesCapture-AD/
+NdesCapture-NDES/
+working-backups/
+automated-backups/
+softwareCheck/
+
+# Migration bundles and logs
+NDESMigration/
+NDESMigration-latest/
+**/ndes-config.json
+**/ndesmigration-*.log
+
+# The capture kit's own lab notes (sanitised copies live in docs/)
+AD-CA.txt
+AD-NDES.txt
+CA.txt
+NDES.txt
+servernames.txt
+
+# Third-party tooling: openssl and sscep are not redistributable, and the file
+# named "download" is Microsoft's mscep.dll captured from a server.
+scep/
+download
+
+# Secrets and key material - never commit these
+password.txt
+*.pfx
+*.pvk
+*.key
+*.secret
+
+# Archives and noise
+*.zip
+*.7z
+.vscode/
+*.tmp
+Thumbs.db
