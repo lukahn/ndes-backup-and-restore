@@ -1461,13 +1461,14 @@ foreach ($endpoint in $endpoints) {
             }
             if ($challenge.Response -and $challenge.Response.Text -match '(?i)sufficient permission') {
                 Write-Info 'The page says "You do not have sufficient permission to enroll with SCEP", which names no cause. In practice it is one of:' 'Warn'
+                Write-Info '  * the app pool identity has no "Request Certificates" on the CA. mscep_admin mints the password by' 'Warn'
+                Write-Info '    calling the CA as that identity, so check this first: certsrv.msc > right-click the CA >' 'Warn'
+                Write-Info '    Properties > Security > the application pool account' 'Warn'
                 Write-Info '  * the account you authenticated as is not a local Administrator on the NDES server' 'Warn'
                 Write-Info '    (whoami /groups | findstr S-1-5-32-544)' 'Warn'
-                Write-Info '  * NDES cannot use its RA certificates: they must come from the templates named in MSCEP' 'Warn'
-                Write-Info '    SignatureTemplate / EncryptionTemplate (CertsInMYStore looks them up by template), and the' 'Warn'
-                Write-Info '    application pool identity needs Read on their private keys' 'Warn'
-                Write-Info '  * the service account lacks "Request Certificates" on the CA, or the CA is unreachable' 'Warn'
-                Write-Info 'The Application log on the NDES server records the real reason (provider MSCEP); the restore prints those events too.' 'Warn'
+                Write-Info "  * the app pool identity cannot read the RA certificates' private keys in the machine store" 'Warn'
+                Write-Info '  * the CA is unreachable from this server: the call is DCOM, so an open port 135 is not enough' 'Warn'
+                Write-Info 'If the Application log has no MSCEP event, the failure happened during the CA call, before NDES could log it.' 'Warn'
             }
             $result.Problem = 'no challenge password'
             $results += $result
