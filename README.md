@@ -567,11 +567,23 @@ need to be a local administrator for the roles and features to install.
 
 ### The SPN, and why the account cannot set it for itself
 
-IIS registers SPNs for a site when the pool runs as `ApplicationPoolIdentity`,
-because the identity is the machine. It does **not** do that for a custom
-identity, so a gMSA with no SPN leaves `mscep_admin` authenticating over NTLM.
-That still works — NTLM is not disabled anywhere — but anything that requires
-Kerberos fails, and the failure is a silent fallback rather than an error.
+An NDES install does end up with an `HTTP/<site name>` SPN, and the capture shows
+where it goes — on the **app pool identity**, not the machine account:
+
+```
+CN=NDES      (computer account) : HOST/NDES, HOST/ndes.contoso.com, WSMAN/NDES, …
+CN=svc_ndes  (service account)  : http/ndes.contoso.com
+```
+
+The export cannot say whether the NDES wizard or IIS wrote it, but it is not on the
+computer account, which is where `ApplicationPoolIdentity` would put it. The restore
+therefore registers the SPN explicitly instead of depending on that behaviour — and
+with a gMSA it has to, because nothing that would do the registration can log on as
+the account.
+
+Without an SPN, `mscep_admin` falls back to NTLM. That still works — NTLM is not
+disabled anywhere — but anything that requires Kerberos fails, and the failure is a
+silent fallback rather than an error.
 
 The gMSA *is* allowed to write its own SPN: the class grants that to the account
 itself, which is how a service running as a gMSA registers something like
@@ -736,6 +748,52 @@ The original Enterprise Admin requirement came from the setup wizard enrolling t
 about the RA certificates being special — it was about which identity held Enroll
 on the templates at that moment.
 
+### What the install actually writes to Active Directory
+
+The capture kit answers this rather than arguing it. Diffing `T0-ndes` against
+`T1-ndes` — the same domain controller, before and after the NDES install — gives
+exactly three changes across both partitions:
+
+| Partition | Object | Change |
+| --- | --- | --- |
+| Domain | `CN=svc_ndes,CN=Users` | `servicePrincipalName: http/ndes.contoso.com` added |
+| Domain | `CN=svc_ndes,CN=Users` | `userCertificate` added |
+| Configuration | `CN=CONTOSO-SUBCA,CN=Enrollment Services,…` | `certificateTemplates: IPSECIntermediateOffline` added |
+
+**No objects were created or deleted, and no group membership changed.** Every other
+differing line between the two exports was `lastLogon` / `logonCount` /
+`lastLogonTimestamp` noise from machines logging on.
+
+So EA did nothing structural. The requirement is enrolment rights at that moment —
+"the templates must let this identity enrol" — not anything the wizard does to the
+directory.
+
+Two of those three are worth understanding, because they have nothing to do with
+Enterprise Admin:
+
+- **The `userCertificate` is not an RA certificate.** Decoded, it was a SCEP-issued
+  device certificate (`CN=devicetest1`) from the `NDESUser` template, published to
+  the account that *submitted* the request. NDES submits SCEP requests as its own
+  service account, so device certificates accumulate on that account's AD object
+  whenever the template has *Publish certificate in Active Directory* ticked. That
+  applies to a gMSA too — they land on
+  `CN=svc_ndes,CN=Managed Service Accounts`. Clear that template setting if you do
+  not want them.
+- **The Configuration-partition entry is the CA, not NDES.** A template was published
+  on the CA during the window. Nothing in the SCEP flow needs it: a request that
+  references an unpublished template still issues, as long as its ACL allows it —
+  which is what the RA enrolment here relies on.
+
+Two limits on that conclusion:
+
+- **These exports carry no security descriptors** (`nTSecurityDescriptor` count: 0),
+  so an ACL change made by the wizard would be invisible in them. To be certain
+  nothing was granted, `dsacls` the two RA templates and the CA object before and
+  after a wizard run — or rely on `-Preflight`, which evaluates exactly those
+  template ACEs for the identity that will enrol.
+- **The window includes manual testing.** Anything done by hand in the same period
+  lands in the same diff, so the published template and the device certificate may
+  both be that rather than the install.
 
 Worth proving rather than assuming. The CA database records the requester of every
 request, issued or failed. On the CA:
@@ -758,10 +816,13 @@ On the lab build of this project that produced:
 Two conclusions, both useful:
 
 - The **Enterprise Admin** step exists because setup ran as EA to enrol the RA
-  templates. It is not needed once a template grants `svc_ndes` Enroll — which is
-  the point of this script.
-- RA certificates are always requested by a **user** identity, never the computer
-  account. The server certificate is the opposite: it is requested by the machine.
+  templates. It is not needed once a template grants the NDES servers' computer
+  account Enroll — which is the point of this script.
+- RA certificates **can** be requested by either identity. The wizard asked as the
+  EA user (rows 3 and 4 above); this restore asks in **machine context**, so
+  `CONTOSO\NDES$` is the requester — which is why the RA templates need Enroll for
+  the computer account rather than for a service account. The server certificate is
+  requested by the machine either way.
 
 ### Two ways to authenticate the request
 

@@ -2,7 +2,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 
 .\NDESMigration.ps1 -Backup
 
-.\NDESMigration.ps1 -Restore -Path C:\NDESMigration\NDES-20261124-221156 -RAEncryptionTemplate CEPEncryption -RASigningTemplate MachineEnrollmentAgent -SkipPreFlight
+.\NDESMigration.ps1 -Restore -Path C:\NDESMigration\NDES-20261123-173058 -RAEncryptionTemplate CEPEncryption -RASigningTemplate MachineEnrollmentAgent -SkipPreFlight
 
 ---
 .\Start-NdesCapture.ps1 -Label ndes
