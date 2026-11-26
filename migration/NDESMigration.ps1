@@ -4030,7 +4030,7 @@ function Get-RaEnrolmentHint {
     }
     if ($Reason -match 'issued only to a user|CONTEXT_E_ROLENOTFOUND|0x8004e00c') {
         $text = "Template '{0}' is not machine-capable, so a request into LocalMachine\My is refused before its ACL " +
-        "is even consulted. Use 'MachineEnrollmentAgent' (Machine Enrollment Agent) for the signing role - it has " +
+        "is even consulted. Use 'MachineEnrollmentAgent' - display name 'Enrollment Agent (Computer)' - for the signing role. It has " +
         "the Certificate Request Agent EKU and accepts computers. Templates that accept computers have the 0x40 bit " +
         "set in their AD 'flags' attribute. Recorded in the bundle as MSCEP {1}."
         return ($text -f $Template, $MscepValue, $Identity)

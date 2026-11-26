@@ -706,7 +706,7 @@ The direction of the two enrolment templates matters, and they are easy to swap:
 | MSCEP value | Certificate | Default template |
 | --- | --- | --- |
 | `EncryptionTemplate` | encrypts the SCEP challenge | `CEPEncryption` (CEP Encryption) |
-| `SignatureTemplate` | signs requests to the CA | `MachineEnrollmentAgent` (Machine Enrollment Agent) |
+| `SignatureTemplate` | signs requests to the CA | `MachineEnrollmentAgent` (display name "Enrollment Agent (Computer)") |
 
 The signing role needs the **computer** enrollment agent template.
 `EnrollmentAgentOffline` — "Exchange Enrollment Agent (Offline request)" — is the
