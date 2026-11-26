@@ -979,24 +979,72 @@ idempotently, and an existing bundle or certificate is only replaced with
 `-Force`. A restore that stopped at the certificate step needs no snapshot
 revert — fix the cause and run it again.
 
+### Minimum permissions
+
+Every right NDES needs, in one place. The table is the result of scoping a working
+build down and removing grants until it broke, so each row is load-bearing.
+
+| Identity | Where | Right | Fails without it |
+| --- | --- | --- | --- |
+| NDES server computer account (`NDES$`), or a group holding them | RA templates and the server certificate template | **Read + Enroll** | the restore cannot enrol the RA or server certificate |
+| App pool identity (`svc_ndes$`, the gMSA) | **CA** → Properties → Security | **Request Certificates** | `mscep_admin` cannot mint a password: *"You do not have sufficient permission to enroll with SCEP"* |
+| App pool identity | **the device template** — MSCEP `GeneralPurposeTemplate` (`NDESUser`) | **Read + Enroll** | the device's enrolment is denied: `0x80094012 CERTSRV_E_TEMPLATE_DENIED`, *Denied by Policy Module* |
+| Whoever asks for a challenge password | the same device template | **Read + Enroll** | `mscep_admin` refuses to mint: *"cannot provide its password because the user does not have Enroll permissions…"* |
+| The operator running the restore | local `Administrators` on the NDES server | (membership) | the restore cannot write the app pool, registry or bindings |
+| The operator running the restore | `servicePrincipalName` on the gMSA | delegated write | the SPN step is skipped, and Kerberos falls back to NTLM |
+
+#### Two checks, two identities, one template
+
+The two most confusing failures both look like a template permission problem, and
+both are — but the CA is evaluating **different identities**:
+
+| Stage | The CA evaluates | Symptom |
+| --- | --- | --- |
+| `mscep_admin` mints a password | **the caller** — the person asking | *"cannot provide its password because the user does not have Enroll permissions"* |
+| The device's request is submitted | **the app pool identity** — the account NDES submits as | `0x80094012` *Denied by Policy Module* at enrolment |
+
+NDES will not mint a challenge password unless the caller could themselves enrol
+that template, and it will not submit a request the app pool identity is not
+allowed to make. Both were verified by removing each grant in turn: the failure
+moves between those two messages rather than going away.
+
+Microsoft documents the second — "the NDES service account requires Read and
+Enroll permissions to this template" — but not the first, which is why it takes
+two rounds to find.
+
+#### Scoping it down without breaking it
+
+- **Use groups.** `NDES-Servers` for the computer accounts, and a second group for
+  the humans allowed to mint passwords. Granting Read + Enroll to "everyone who
+  might test" turns the device template into the widest hole in the design: Enroll
+  on it is the right to authorise a device certificate.
+- **Prefer the explicit account on the CA over `Authenticated Users`.** Request
+  Certificates for Authenticated Users means any domain principal may submit
+  requests; the template ACLs still gate what they get, but it is not the narrow
+  grant this design is aiming for.
+- **Publish the device template, but not the RA templates.** NDES checks that the
+  CA is *enabled to issue* the configured device template before it mints a
+  password, so `NDESUser` belongs in the CA's published list. The RA templates do
+  not: they are enrolled by a direct request, and a template absent from that list
+  still issues when its ACL allows it (measured — the signing template used here
+  was never published).
+- **What can go**: Enterprise Admin and Domain Admin, once the KDS root key and the
+  account exist; the old user service account once a gMSA is in use; and any
+  account added "to test".
+
 ### Prerequisites on the target
 
 - Domain-joined, and running elevated.
 - The **computer account** (`SERVER$`) needs Read + Enroll on the RA templates the
   restore enrols from, since it requests them in machine context — unless you pass
   a CEP endpoint and credential, in which case it is the **service account** that
-  does. A template that grants Enroll to the service account but not to the
-  servers is the classic cause of `You do not have sufficient permission to enroll
-  with SCEP`: the encryption certificate is never issued, and every request that
-  needs it fails. `-Preflight` evaluates the template ACL for whichever identity
-  will actually be used. Request Certificates on the CA is still needed for the
-  service account.
-- The restoring account needs local Administrator and Request Certificates on
-  the CA, since it writes the private keys into the machine store. It does **not**
-  need Enterprise Admin, Domain Admin, or any rights on the service account's AD
-  object.
+  does. `-Preflight` evaluates the template ACL for whichever identity will
+  actually be used.
 - If `Install-WindowsFeature` needs a restart, the script stops and asks you to
   reboot and run `-Restore` again.
+
+See **Minimum permissions** above for the full set, including what
+`mscep_admin` needs.
 
 ### Rotating the service account password
 
