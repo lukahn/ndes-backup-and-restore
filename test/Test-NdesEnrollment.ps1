@@ -1594,6 +1594,10 @@ foreach ($endpoint in $endpoints) {
             }
             catch { Write-Verbose "No status text: $($_.Exception.Message)" }
             Write-Info 'The CA or NDES policy rejected the request. The usual causes are an expired or already-used challenge password, a template the device cannot enrol, or the CA refusing the RA signature.' 'Warn'
+            Write-Info 'CERTSRV_E_TEMPLATE_DENIED "Denied by Policy Module" is specific: the CA checked the REQUESTER - the identity that submitted the request, which for SCEP is the application pool account - against the template the device is being issued from, and it has no Enroll.' 'Warn'
+            Write-Info '  * the template is the one NDES issues devices from - the MSCEP GeneralPurposeTemplate / CertificateTemplate value (NDESUser on a default build)' 'Warn'
+            Write-Info '  * grant that account - or a group holding it - Read + Enroll on that template, then restart the Certificate Services service so the CA re-reads the template' 'Warn'
+            Write-Info 'The CA records it as Event 53 (source Certificate Services) in its Application log, naming the requester and the template.' 'Warn'
             $result.Problem = 'enrolment rejected'
         }
         elseif ($disposition -eq 'Pending') {
