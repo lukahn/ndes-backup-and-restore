@@ -489,18 +489,74 @@ Because appcmd will happily accept a set it did not apply, the app pool's
 restore fails loudly if the identity, the user name or the empty password did not
 stick. That check exists because the failure mode is otherwise a silent HTTP 503.
 
-Before the restore will run, the gMSA must already work on that host:
+The restore **runs `Install-ADServiceAccount` for you**. It happens in the gMSA
+step, before the preflight checks — so it also happens when you pass
+`-SkipPreflight`, because every check about the account depends on it:
+
+```
+== Confirming settings
+Service account (domain\user) [CONTOSO\svc_ndes$]:
+Run CONTOSO\svc_ndes$ as a group Managed Service Account (no password)? [Y/n]
+
+  [ok]   Installed the gMSA on this host: svc_ndes
+  [ok]   Service account is a gMSA: CONTOSO\svc_ndes$ - installed on this host and its managed password is readable
+```
+
+It is skipped when `Test-ADServiceAccount` already reports the account as usable,
+so re-running a restore does not touch the host again. `-WhatIf` reports the
+commands instead of running them, and `-Preflight` does run them — they are the
+only changes a preflight run makes, and it names them when it exits:
+
+```
+== Preflight only
+  [warn] Changed on this host first: RSAT-AD-PowerShell, the gMSA registration. Nothing else was changed (-Preflight).
+```
+
+If the registration fails, the restore stops before changing anything and says
+why. The usual causes are that the computer account is not in
+`PrincipalsAllowedToRetrieveManagedPassword`, the domain has no KDS root key, or
+the name is a user account rather than a gMSA. By hand, it is:
 
 ```powershell
-# once per NDES server, elevated - see "What Install-ADServiceAccount does" below
 Install-ADServiceAccount -Identity svc_ndes
 Test-ADServiceAccount    -Identity svc_ndes   # must return True
 ```
 
-`Install-ADServiceAccount` needs the ActiveDirectory module, so on a server
-without RSAT run it from somewhere that has it against the host, or accept the
-`Test-ADServiceAccount` "not checked" line and let the app pool start be the
-proof.
+The restore also **installs the ActiveDirectory module** if the server does not
+have it. `Install-ADServiceAccount`, `Test-ADServiceAccount` and
+`Get-ADServiceAccount` all live in `RSAT-AD-PowerShell`, which an NDES build
+does not carry, so the script adds that one feature and imports the module
+before using it:
+
+```
+== Installing RSAT-AD-PowerShell (ActiveDirectory module, needed for the gMSA)
+  [ok]   RSAT-AD-PowerShell installed
+  [ok]   ActiveDirectory module imported
+```
+
+It is skipped when the module is already available, so a second run touches
+nothing. If the install needs a restart, the script says so and stops rather
+than carrying on with a module it cannot load.
+
+`RSAT-AD-PowerShell` is on the list of features a clean NDES build does *not*
+have, so the parity check would normally report it as over-installation. With a
+gMSA it is exempt and reported as expected instead:
+
+```
+[ok]   Installed by this run and expected here: RSAT-AD-PowerShell (the gMSA path needs the ActiveDirectory module)
+```
+
+By hand, the two commands it runs are:
+
+```powershell
+Install-WindowsFeature -Name RSAT-AD-PowerShell
+Install-ADServiceAccount -Identity svc_ndes
+Test-ADServiceAccount    -Identity svc_ndes   # must return True
+```
+
+If neither can run — for example the feature is not in this image — the script
+warns rather than stopping, `Test-ADServiceAccount` then reports *not checked*,
+and the app pool start afterwards is the real proof.
 
 Local group membership is left to you, as you asked: the script adds `IIS_IUSRS`
 and reports whether the account is in `Administrators` without changing it. The
@@ -531,7 +587,8 @@ gMSA identity.
 
 Consequences worth knowing:
 
-- It is **per host**. Every NDES server you build needs it run again.
+- It is **per host**. Every NDES server you build needs it run again — which is
+  why this script runs it rather than asking you to remember.
 - It must be run **elevated**, and needs the ActiveDirectory module.
 - `Test-ADServiceAccount` verifies afterwards (returns `True`/`False` rather than
   throwing), and `Uninstall-ADServiceAccount` removes the local secret when you

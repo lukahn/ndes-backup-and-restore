@@ -60,8 +60,8 @@
     there is no password to type or store. The app pool identity is written with
     the account name only, and the checks that need a password are replaced by
     gMSA ones. If omitted you are asked, defaulting to yes when the name ends in
-    '$'. The gMSA must already be installed on this host (Install-ADServiceAccount)
-    and this computer must be allowed to read its password.
+    '$'. The gMSA is registered on this host with Install-ADServiceAccount before
+    the preflight runs, and therefore also with -SkipPreflight.
 
 .PARAMETER CAConfig
     Override the CA configuration string (default: captured value).
@@ -95,7 +95,10 @@
     configured with a valid certificate.
 
 .PARAMETER Preflight
-    Run only the read-only preflight checks and exit. Nothing is changed.
+    Run only the preflight checks and exit. The checks themselves change nothing -
+    the one exception is a gMSA, which is registered on this host first
+    (Install-ADServiceAccount), because every check about the account depends on
+    it. -WhatIf still prevents that.
 
 .PARAMETER SkipPreflight
     Skip the preflight checks. Use when a check is known to fail for a reason
@@ -3634,6 +3637,127 @@ function Test-GmsaReady {
     }
 }
 
+function Install-NdesAdModule {
+    <#
+        Makes the ActiveDirectory module available on this server.
+
+        Install-ADServiceAccount, Test-ADServiceAccount and Get-ADServiceAccount all
+        live in it, and a plain NDES server does not have it: RSAT is not part of
+        the NDES build. The gMSA path needs all three, so the feature is installed
+        the same way the NDES features are and then imported - installing a feature
+        does not load its module into a session that is already running.
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param()
+
+    if ((Get-Command Install-ADServiceAccount -ErrorAction SilentlyContinue) -and
+        (Get-Command Test-ADServiceAccount -ErrorAction SilentlyContinue)) {
+        Write-Info 'ActiveDirectory module already available' 'Ok'
+        return [pscustomobject]@{ Ready = $true; Installed = $false }
+    }
+
+    $installed = $false
+
+    $feature = 'RSAT-AD-PowerShell'
+    $state = ''
+    if (Get-Command Get-WindowsFeature -ErrorAction SilentlyContinue) {
+        $row = Get-WindowsFeature -Name $feature -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($row) { $state = [string]$row.InstallState }
+    }
+
+    if ($state -eq 'Installed') {
+        Write-Info ("{0} is installed" -f $feature) 'Ok'
+    }
+    elseif (-not (Get-Command Install-WindowsFeature -ErrorAction SilentlyContinue)) {
+        Write-Info ('Install-WindowsFeature is not available, so {0} cannot be installed from here' -f $feature) 'Warn'
+        return [pscustomobject]@{ Ready = $false; Installed = $false }
+    }
+    elseif (-not $PSCmdlet.ShouldProcess($feature, 'Install-WindowsFeature')) {
+        Write-Info ("Would install {0}, which provides Install-ADServiceAccount" -f $feature) 'Warn'
+        return [pscustomobject]@{ Ready = $false; Installed = $false }
+    }
+    else {
+        Write-Step ('Installing {0} (ActiveDirectory module, needed for the gMSA)' -f $feature)
+        try {
+            $result = Install-WindowsFeature -Name $feature -ErrorAction Stop
+            if (-not $result.Success) {
+                Write-Info ("{0} did not install (exit code {1}). Install it by hand: Install-WindowsFeature {2}" -f `
+                        $feature, $result.ExitCode, $feature) 'Warn'
+                return [pscustomobject]@{ Ready = $false; Installed = $false }
+            }
+            $installed = $true
+            Write-Info ("{0} installed" -f $feature) 'Ok'
+            if ([string]$result.RestartNeeded -eq 'Yes') {
+                Write-Info ("{0} needs a restart before the module can be loaded. Reboot and run the restore again." -f $feature) 'Warn'
+                return [pscustomobject]@{ Ready = $false; Installed = $true }
+            }
+        }
+        catch {
+            Write-Info ("Install-WindowsFeature {0} failed: {1}" -f $feature, $_.Exception.Message) 'Warn'
+            return [pscustomobject]@{ Ready = $false; Installed = $false }
+        }
+    }
+
+    try {
+        Import-Module ActiveDirectory -ErrorAction Stop
+        Write-Info 'ActiveDirectory module imported' 'Ok'
+        return [pscustomobject]@{ Ready = $true; Installed = $installed }
+    }
+    catch { $importError = $_.Exception.Message }
+
+    # A module path the feature install added is not always visible to a session
+    # that was already running, so try the location RSAT uses.
+    $explicit = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\Modules\ActiveDirectory'
+    if (Test-Path -LiteralPath $explicit) {
+        try {
+            Import-Module $explicit -ErrorAction Stop
+            Write-Info 'ActiveDirectory module imported from its install path' 'Ok'
+            return [pscustomobject]@{ Ready = $true; Installed = $installed }
+        }
+        catch { }
+    }
+    Write-Info ("Could not import the ActiveDirectory module: {0}" -f $importError) 'Warn'
+    return [pscustomobject]@{ Ready = $false; Installed = $installed }
+}
+
+function Install-NdesGmsa {
+    <#
+        Registers the gMSA on this host with Install-ADServiceAccount.
+
+        This is host preparation, not NDES configuration: without the local
+        credential it creates, LSA cannot log the identity on and the app pool never
+        starts. It is called before the preflight - and therefore also when the
+        preflight is skipped - because every check about the account depends on it.
+        It does change the host, so -WhatIf does not perform it.
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param([Parameter(Mandatory)][string]$Account)
+
+    $shortName = (($Account -split '\\')[-1]).TrimEnd('$')
+
+    if (-not (Get-Command Install-ADServiceAccount -ErrorAction SilentlyContinue)) {
+        Write-Info ('Install-ADServiceAccount is not available here (no ActiveDirectory module), so the gMSA cannot be installed from this server. ' +
+            'Run it on the host from a session with RSAT, or add RSAT-AD-PowerShell to this server.') 'Warn'
+        return $false
+    }
+
+    if (-not $PSCmdlet.ShouldProcess($shortName, 'Install-ADServiceAccount')) {
+        Write-Info ("Would install the gMSA on this host: Install-ADServiceAccount -Identity {0}" -f $shortName) 'Warn'
+        return $false
+    }
+
+    try {
+        Install-ADServiceAccount -Identity $shortName -ErrorAction Stop | Out-Null
+        Write-Info ("Installed the gMSA on this host: {0}" -f $shortName) 'Ok'
+        return $true
+    }
+    catch {
+        Write-Info ("Install-ADServiceAccount failed for {0}: {1}" -f $shortName, $_.Exception.Message) 'Warn'
+        Write-Info 'Usual causes: this computer account is not in PrincipalsAllowedToRetrieveManagedPassword, the domain has no KDS root key, or the name is a user account rather than a gMSA.' 'Warn'
+        return $false
+    }
+}
+
 function Grant-CertificateKeyRead {
     <#
         Grants an account read access to a certificate's private key file.
@@ -4179,12 +4303,25 @@ function Invoke-Restore {
 
     # --- credentials -------------------------------------------------------
     $secret = $null
+    $gmsaInstalled = $false
+    $prereqChanges = @()
     if ($isGmsa) {
         if ($ServiceAccountCredential) {
             Write-Info 'A credential was supplied as well; it is ignored, because a gMSA password cannot be entered by anyone.' 'Warn'
             $ServiceAccountCredential = $null
         }
+        # The cmdlets this path needs live in the ActiveDirectory module, which a
+        # plain NDES server does not have.
+        $adModule = Install-NdesAdModule
+        if ($adModule.Installed) { $prereqChanges += 'RSAT-AD-PowerShell' }
         $gmsaReady = Test-GmsaReady -Account $account
+        if ($gmsaReady.State -ne 'Ready') {
+            # Runs before the preflight and therefore also under -SkipPreflight: the
+            # registration is what everything else about the account depends on.
+            $gmsaInstalled = Install-NdesGmsa -Account $account
+            if ($gmsaInstalled) { $prereqChanges += 'the gMSA registration' }
+            $gmsaReady = Test-GmsaReady -Account $account
+        }
         if ($gmsaReady.State -eq 'Missing') {
             throw ("{0} is not usable on this host: {1} " +
                 'Run Install-ADServiceAccount as an administrator on this server, and make sure this computer account is allowed to read the gMSA password (PrincipalsAllowedToRetrieveManagedPassword).') -f `
@@ -4272,7 +4409,10 @@ function Invoke-Restore {
 
         if ($Preflight) {
             Write-Step 'Preflight only'
-            Write-Info 'No changes were made (-Preflight).'
+            if ($prereqChanges.Count -gt 0) {
+                Write-Info ('Changed on this host first: {0}. Nothing else was changed (-Preflight).' -f ($prereqChanges -join ', ')) 'Warn'
+            }
+            else { Write-Info 'No changes were made (-Preflight).' }
             if ($preflightCounts['Fail'] -gt 0) { Write-Info ("{0} check(s) would block a restore." -f $preflightCounts['Fail']) 'Warn' }
             return
         }
@@ -5166,7 +5306,12 @@ function Test-FeatureParity {
         configuration wizard installs it). Nothing is uninstalled automatically -
         only the operator can say whether an extra role service is wanted.
     #>
-    param([AllowEmptyCollection()][string[]]$Expected = @())
+    param(
+        [AllowEmptyCollection()][string[]]$Expected = @(),
+        # Features installed on purpose that the reference build does not have, so
+        # they are not reported as over-installation.
+        [AllowEmptyCollection()][string[]]$AllowExtra = @()
+    )
 
     if (-not (Get-Command Get-WindowsFeature -ErrorAction SilentlyContinue)) { return 0 }
 
@@ -5206,10 +5351,17 @@ function Test-FeatureParity {
     # These only appear when a parent feature is requested (or when the box was
     # built by hand): the reference build has none of them. Reported, not counted
     # - they may pre-date the restore.
-    $overInstalled = @($installedNames | Where-Object { $script:OverInstallIndicators -contains $_ -and $unexpected -notcontains $_ })
+    $overInstalled = @($installedNames | Where-Object {
+            $script:OverInstallIndicators -contains $_ -and $unexpected -notcontains $_ -and $AllowExtra -notcontains $_
+        })
     if ($overInstalled.Count -gt 0) {
         Write-Info ('Features the reference build does not have: {0}' -f ($overInstalled -join ', ')) 'Warn'
         Write-Info 'Each of these is a default child of a parent feature (AD-Certificate, RSAT, RSAT-ADCS, NET-WCF-Services45, Web-Mgmt-Tools/Compat). Requesting the parent installs the whole group; requesting the leaves installs only what is needed. Remove the parent from the bundle feature list, or uninstall these by hand.' 'Warn'
+    }
+
+    $allowed = @($installedNames | Where-Object { $AllowExtra -contains $_ })
+    if ($allowed.Count -gt 0) {
+        Write-Info ('Installed by this run and expected here: {0} (the gMSA path needs the ActiveDirectory module)' -f ($allowed -join ', ')) 'Ok'
     }
 
     return $failures
@@ -5412,8 +5564,12 @@ function Test-NdesConfiguration {
         }
     }
 
-    # Feature parity with the bundle (and with the baseline this script installs)
-    $failures += (Test-FeatureParity -Expected $Features)
+    # Feature parity with the bundle (and with the baseline this script installs).
+    # A gMSA needs the ActiveDirectory module, which the reference build has no
+    # reason to carry, so that one feature is expected rather than over-installed.
+    $allowedExtra = @()
+    if ($UseGmsa) { $allowedExtra = @('RSAT-AD-PowerShell') }
+    $failures += (Test-FeatureParity -Expected $Features -AllowExtra $allowedExtra)
 
     return $failures
 }
