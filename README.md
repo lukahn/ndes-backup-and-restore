@@ -748,6 +748,15 @@ The original Enterprise Admin requirement came from the setup wizard enrolling t
 about the RA certificates being special — it was about which identity held Enroll
 on the templates at that moment.
 
+**Enterprise Admin is used because it can issue a certificate from a template that
+exists only in Active Directory — one that has never been added to the CA.** An
+Enterprise Admin holds Full Control on every template object, inherited from the
+`Certificate Templates` container, and on the CA itself, so no template ACL can
+refuse it and no unpublished template is out of reach. That is the guarantee the
+wizard needs, because it cannot know which template an operator will pick or
+whether anyone published it. Any identity granted Read + Enroll on those templates
+can do the same thing, which is what removes the requirement entirely.
+
 ### What the install actually writes to Active Directory
 
 The capture kit answers this rather than arguing it. Diffing `T0-ndes` against
