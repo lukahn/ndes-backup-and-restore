@@ -52,7 +52,16 @@
 .PARAMETER ServiceAccountCredential
     Credentials for the service account. If omitted you are prompted, so the
     password is never stored in the bundle or on disk. It is used to set the app
-    pool identity and to request the RA certificates as that account.
+    pool identity and to request the RA certificates as that account. Not
+    applicable to a gMSA - see -UseGmsa.
+
+.PARAMETER UseGmsa
+    With -Restore: the service account is a group Managed Service Account, so
+    there is no password to type or store. The app pool identity is written with
+    the account name only, and the checks that need a password are replaced by
+    gMSA ones. If omitted you are asked, defaulting to yes when the name ends in
+    '$'. The gMSA must already be installed on this host (Install-ADServiceAccount)
+    and this computer must be allowed to read its password.
 
 .PARAMETER CAConfig
     Override the CA configuration string (default: captured value).
@@ -154,6 +163,9 @@ param(
 
     [Parameter(ParameterSetName = 'Restore')]
     [System.Management.Automation.PSCredential]$ServiceAccountCredential,
+
+    [Parameter(ParameterSetName = 'Restore')]
+    [switch]$UseGmsa,
 
     [Parameter(ParameterSetName = 'Restore')]
     [string]$CAConfig,
@@ -1788,7 +1800,8 @@ function Invoke-Preflight {
         [Parameter(Mandatory)][string]$EncryptionTemplate,
         [Parameter(Mandatory)][string]$SigningTemplate,
         [System.Management.Automation.PSCredential]$Credential,
-        [string]$EnrollmentPolicyUrl
+        [string]$EnrollmentPolicyUrl,
+        [switch]$UseGmsa
     )
 
     $results = New-Object System.Collections.Generic.List[object]
@@ -1860,8 +1873,19 @@ function Invoke-Preflight {
         catch { & $add 'Directory' 'Service account enabled' 'NotChecked' $_.Exception.Message }
     }
 
-    # The password can be proven without changing anything.
-    if ($Credential) {
+    # The password can be proven without changing anything - but a gMSA has none,
+    # so what matters there is whether this host has installed the account.
+    if ($UseGmsa) {
+        & $add 'Directory' 'Service account is a gMSA' 'Pass' $Account
+        $gmsaReady = Test-GmsaReady -Account $Account
+        switch ($gmsaReady.State) {
+            'Ready' { & $add 'Host' 'gMSA installed on this host' 'Pass' $gmsaReady.Detail }
+            'Missing' { & $add 'Host' 'gMSA installed on this host' 'Fail' $gmsaReady.Detail }
+            default { & $add 'Host' 'gMSA installed on this host' 'NotChecked' $gmsaReady.Detail }
+        }
+        & $add 'Directory' 'Service account password' 'NotChecked' 'a gMSA password is managed by the domain; there is nothing to type or store'
+    }
+    elseif ($Credential) {
         $check = Test-AccountCredential -UserName $Credential.UserName -Credential $Credential
         if ($check.Valid -eq $true) { & $add 'Directory' 'Service account password' 'Pass' 'validated against the domain' }
         elseif ($check.Valid -eq $false) { & $add 'Directory' 'Service account password' 'Fail' 'the domain rejected it - the app pool would not start with it' }
@@ -1871,7 +1895,12 @@ function Invoke-Preflight {
 
     try {
         $admins = @(Get-LocalGroupMember -Group 'Administrators' -ErrorAction Stop | ForEach-Object { $_.Name })
-        if ($admins -contains $Account) { & $add 'Host' 'Service account is not a local admin' 'Warn' 'it is - not required by this design' }
+        $isAdmin = $admins -contains $Account
+        if ($UseGmsa) {
+            if ($isAdmin) { & $add 'Host' 'gMSA in local Administrators' 'Pass' 'present - this script does not need it (the restore runs as you); the accounts allowed to run it are the gMSA''s own concern' }
+            else { & $add 'Host' 'gMSA in local Administrators' 'Pass' 'not a member' }
+        }
+        elseif ($isAdmin) { & $add 'Host' 'Service account is not a local admin' 'Warn' 'it is - not required by this design' }
         else { & $add 'Host' 'Service account is not a local admin' 'Pass' '' }
     }
     catch { & $add 'Host' 'Service account is not a local admin' 'NotChecked' $_.Exception.Message }
@@ -2114,6 +2143,51 @@ function Confirm-Value {
     $answer = Read-Host ("{0} [{1}]" -f $Label, $Default)
     if ([string]::IsNullOrWhiteSpace($answer)) { return $Default.Trim() }
     return $answer.Trim()
+}
+
+function Get-AppPoolIdentity {
+    <#
+        Reads an application pool's identity straight from applicationHost.config,
+        because appcmd can accept a set that IIS then ignores - notably an empty
+        password for a gMSA, which is the value that matters most.
+    #>
+    param([Parameter(Mandatory)][string]$Name)
+
+    $appHost = Join-Path $env:SystemRoot 'System32\inetsrv\config\applicationHost.config'
+    if (-not (Test-Path -LiteralPath $appHost)) { return $null }
+    try {
+        [xml]$ah = Get-Content -LiteralPath $appHost -Raw
+        $pool = $ah.SelectSingleNode("/configuration/system.applicationHost/applicationPools/add[@name='$Name']")
+        if (-not $pool) { return $null }
+        $processModel = $pool.SelectSingleNode('processModel')
+        if (-not $processModel) {
+            return [pscustomobject]@{ IdentityType = ''; UserName = ''; PasswordStored = $false }
+        }
+        return [pscustomobject]@{
+            IdentityType   = [string](Get-XmlAttr -Node $processModel -Name 'identityType')
+            UserName       = [string](Get-XmlAttr -Node $processModel -Name 'userName')
+            PasswordStored = -not [string]::IsNullOrEmpty([string](Get-XmlAttr -Node $processModel -Name 'password'))
+        }
+    }
+    catch { return $null }
+}
+
+function Confirm-YesNo {
+    <#
+        A yes/no prompt with a default, for questions whose answer is not a string.
+        -Verify must not stop for input, so it returns the default.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Label,
+        [bool]$Default = $false
+    )
+
+    if ($Verify) { return $Default }
+
+    $suffix = if ($Default) { '[Y/n]' } else { '[y/N]' }
+    $answer = Read-Host ('{0} {1}' -f $Label, $suffix)
+    if ([string]::IsNullOrWhiteSpace($answer)) { return $Default }
+    return ($answer -match '^(?i)\s*y')
 }
 
 function Get-DismFeatureList {
@@ -2586,7 +2660,8 @@ function Set-NdesApplicationPool {
     param(
         [Parameter(Mandatory)]$AppPool,
         [Parameter(Mandatory)][string]$Account,
-        [Parameter(Mandatory)][securestring]$Password
+        [securestring]$Password,
+        [switch]$UseGmsa
     )
 
     Write-Step ('Configuring application pool {0}' -f $AppPool.Name)
@@ -2623,16 +2698,49 @@ function Set-NdesApplicationPool {
     # appcmd only accepts the password in clear text on its command line, so it
     # has to leave the SecureString here - this is as far down as it can be kept
     # wrapped.
-    $plainPassword = [System.Net.NetworkCredential]::new('', $Password).Password
-    if ($PSCmdlet.ShouldProcess($AppPool.Name, "Set identity to $Account")) {
-        Invoke-AppCmd -Arguments @('set', 'apppool', ('/apppool.name:{0}' -f $AppPool.Name),
-            '/processModel.identityType:SpecificUser',
-            ('/processModel.userName:{0}' -f $Account),
-            ('/processModel.password:{0}' -f $plainPassword),
-            '/processModel.idleTimeout:00:00:00') | Out-Null
+    #
+    # A gMSA has no password to give: LSA logs the identity on from the secret
+    # Install-ADServiceAccount created for this host, and the password attribute
+    # has to stay empty for WAS to take that path. Writing any value there
+    # instead makes the pool fail with "the identity is invalid".
+    if ($UseGmsa) {
+        if ($PSCmdlet.ShouldProcess($AppPool.Name, "Set identity to $Account (gMSA, no password)")) {
+            Invoke-AppCmd -Arguments @('set', 'apppool', ('/apppool.name:{0}' -f $AppPool.Name),
+                '/processModel.identityType:SpecificUser',
+                ('/processModel.userName:{0}' -f $Account),
+                '/processModel.password:',
+                '/processModel.idleTimeout:00:00:00') | Out-Null
+        }
+        Write-Info ("Identity set to {0} (SpecificUser, gMSA - no password stored)" -f $Account) 'Ok'
     }
-    $plainPassword = $null
-    Write-Info ("Identity set to {0} (SpecificUser)" -f $Account) 'Ok'
+    else {
+        $plainPassword = [System.Net.NetworkCredential]::new('', $Password).Password
+        if ($PSCmdlet.ShouldProcess($AppPool.Name, "Set identity to $Account")) {
+            Invoke-AppCmd -Arguments @('set', 'apppool', ('/apppool.name:{0}' -f $AppPool.Name),
+                '/processModel.identityType:SpecificUser',
+                ('/processModel.userName:{0}' -f $Account),
+                ('/processModel.password:{0}' -f $plainPassword),
+                '/processModel.idleTimeout:00:00:00') | Out-Null
+        }
+        $plainPassword = $null
+        Write-Info ("Identity set to {0} (SpecificUser)" -f $Account) 'Ok'
+    }
+
+    # appcmd reports success for a set it did not apply, and for a gMSA the
+    # difference is invisible until the pool is started and 503s, so read it back.
+    if (-not $WhatIfPreference) {
+        $applied = Get-AppPoolIdentity -Name $AppPool.Name
+        if ($applied -and $UseGmsa) {
+            if ($applied.IdentityType -ne 'SpecificUser' -or $applied.UserName -ne $Account -or $applied.PasswordStored) {
+                throw ("The app pool did not take the gMSA identity as written (identityType='{0}', userName='{1}', password stored={2}). " +
+                    "Set it by hand: IIS Manager > Application Pools > {3} > Advanced Settings > Identity > Custom account, value {4} with no password.") -f `
+                    $applied.IdentityType, $applied.UserName, $applied.PasswordStored, $AppPool.Name, $Account
+            }
+        }
+        elseif ($applied -and $applied.UserName -and $applied.UserName -ne $Account) {
+            Write-Info ("The app pool now records {0}, not {1}" -f $applied.UserName, $Account) 'Warn'
+        }
+    }
 }
 
 function Set-NdesApplications {
@@ -3486,6 +3594,46 @@ public static class NdesBatchLogon
     return [pscustomobject]@{ Valid = $false; Reason = $reason }
 }
 
+function Test-GmsaReady {
+    <#
+        Whether a gMSA is usable on this host right now.
+
+        There is no password to check: LSA derives it from the domain's KDS root
+        key. What can be established is whether this host has installed the account
+        (Install-ADServiceAccount), which is what creates the local secret LSA logs
+        the identity on with, and - when the ActiveDirectory module happens to be
+        present - whether the password can actually be retrieved, which also proves
+        this computer is allowed to read it.
+    #>
+    param([Parameter(Mandatory)][string]$Account)
+
+    $shortName = (($Account -split '\\')[-1]).TrimEnd('$')
+
+    if (-not (Get-Command Test-ADServiceAccount -ErrorAction SilentlyContinue)) {
+        return [pscustomobject]@{
+            State  = 'Unknown'
+            Detail = ('Test-ADServiceAccount is not available here (no ActiveDirectory module), so this is unchecked; ' +
+                'the application pool start below is the real test. Run it manually with: Test-ADServiceAccount -Identity {0}') -f $shortName
+        }
+    }
+
+    try {
+        if (Test-ADServiceAccount -Identity $shortName -ErrorAction Stop) {
+            return [pscustomobject]@{ State = 'Ready'; Detail = 'installed on this host and its managed password is readable' }
+        }
+        return [pscustomobject]@{
+            State  = 'Missing'
+            Detail = 'Test-ADServiceAccount returned false - Install-ADServiceAccount has not been run on this host, or this computer is not allowed to retrieve the password.'
+        }
+    }
+    catch {
+        return [pscustomobject]@{
+            State  = 'Missing'
+            Detail = ('Test-ADServiceAccount failed: {0}' -f $_.Exception.Message)
+        }
+    }
+}
+
 function Grant-CertificateKeyRead {
     <#
         Grants an account read access to a certificate's private key file.
@@ -3949,6 +4097,21 @@ function Invoke-Restore {
         throw "Service account must be in DOMAIN\User form. Got: $account"
     }
 
+    # A gMSA has no password anyone can type, so this changes what is asked for
+    # next and which preflight checks are meaningful. The '$' suffix is how a
+    # gMSA appears as an account name, so it makes a good default; an explicitly
+    # supplied password credential settles it without asking.
+    $isGmsa = $false
+    if ($UseGmsa) { $isGmsa = $true }
+    elseif ($ServiceAccountCredential) { $isGmsa = $false }
+    else {
+        $isGmsa = Confirm-YesNo -Label ("Run {0} as a group Managed Service Account (no password)?" -f $account) `
+            -Default ($account.Trim().EndsWith('$'))
+    }
+    if ($isGmsa -and -not $account.Trim().EndsWith('$')) {
+        Write-Info ("{0} does not end in '$', which is how a gMSA is named (its sAMAccountName). Continuing with the name as typed." -f $account) 'Warn'
+    }
+
     $backedUpCA = [string](Get-MscepValue -Config $config -Name 'Configuration')
     if ($CAConfig) { $backedUpCA = $CAConfig }
     $caConfig = Confirm-Value -Label 'CA configuration (CAHost\CAName)' -Default $backedUpCA
@@ -3960,7 +4123,14 @@ function Invoke-Restore {
     # policy endpoint. A default CA does not publish one, so this is opt-in: with
     # no URL the request runs in machine context and the RA template must grant
     # the computer account Enroll.
+    #
+    # A gMSA cannot take that path at all: -Credential needs a password, and
+    # alternate-credential enrolment is the only thing the URL is for.
     $policyUrl = $EnrollmentPolicyUrl
+    if ($isGmsa -and $policyUrl) {
+        Write-Info 'A gMSA has no password, so alternate-credential (CEP) enrolment cannot be used; enrolling in machine context instead.' 'Warn'
+        $policyUrl = ''
+    }
 
     $recordedTemplate = Get-OptionalProperty -Object $config -Name 'ServerCertificateTemplate'
     $templateDefault = if ($ServerCertificateTemplate) { $ServerCertificateTemplate }
@@ -4008,22 +4178,38 @@ function Invoke-Restore {
     }
 
     # --- credentials -------------------------------------------------------
-    if (-not $ServiceAccountCredential) {
-        $ServiceAccountCredential = Get-Credential -UserName $account -Message "Password for $account (used for the SCEP application pool identity)"
-        if (-not $ServiceAccountCredential) { throw 'Credentials are required to set the application pool identity.' }
+    $secret = $null
+    if ($isGmsa) {
+        if ($ServiceAccountCredential) {
+            Write-Info 'A credential was supplied as well; it is ignored, because a gMSA password cannot be entered by anyone.' 'Warn'
+            $ServiceAccountCredential = $null
+        }
+        $gmsaReady = Test-GmsaReady -Account $account
+        if ($gmsaReady.State -eq 'Missing') {
+            throw ("{0} is not usable on this host: {1} " +
+                'Run Install-ADServiceAccount as an administrator on this server, and make sure this computer account is allowed to read the gMSA password (PrincipalsAllowedToRetrieveManagedPassword).') -f `
+                $account, $gmsaReady.Detail
+        }
+        Write-Info ("Service account is a gMSA: {0} - {1}" -f $account, $gmsaReady.Detail) $(if ($gmsaReady.State -eq 'Ready') { 'Ok' } else { 'Warn' })
     }
-    $secret = $ServiceAccountCredential.Password
+    else {
+        if (-not $ServiceAccountCredential) {
+            $ServiceAccountCredential = Get-Credential -UserName $account -Message "Password for $account (used for the SCEP application pool identity)"
+            if (-not $ServiceAccountCredential) { throw 'Credentials are required to set the application pool identity.' }
+        }
+        $secret = $ServiceAccountCredential.Password
 
-    # Validate before touching anything. WAS enforces a batch logon for a custom
-    # app pool identity, and a wrong password there only surfaces later as an
-    # invalid identity and HTTP 503.
-    $batchLogon = Test-BatchLogon -Credential $ServiceAccountCredential
-    if (-not $batchLogon.Valid) {
-        throw ("The SCEP application pool could not log on as {0}: {1}. " +
-            'IIS would disable the pool and every request would return HTTP 503.') -f `
-            $account, $batchLogon.Reason
+        # Validate before touching anything. WAS enforces a batch logon for a custom
+        # app pool identity, and a wrong password there only surfaces later as an
+        # invalid identity and HTTP 503.
+        $batchLogon = Test-BatchLogon -Credential $ServiceAccountCredential
+        if (-not $batchLogon.Valid) {
+            throw ("The SCEP application pool could not log on as {0}: {1}. " +
+                'IIS would disable the pool and every request would return HTTP 503.') -f `
+                $account, $batchLogon.Reason
+        }
+        Write-Info ("Service account can log on for IIS: {0}" -f $account) 'Ok'
     }
-    Write-Info ("Service account can log on for IIS: {0}" -f $account) 'Ok'
 
     # --- registry targets: build now, write in step 4 ----------------------
     # Doing this before the certificates matters: the certificates must come from
@@ -4081,7 +4267,7 @@ function Invoke-Restore {
     if (-not $SkipPreflight) {
         $preflight = Invoke-Preflight -Account $account -CAConfig $caConfig -ServerTemplate $serverTemplate `
             -EncryptionTemplate $raEncryption -SigningTemplate $raSigning -Credential $ServiceAccountCredential `
-            -EnrollmentPolicyUrl $policyUrl
+            -EnrollmentPolicyUrl $policyUrl -UseGmsa:$isGmsa
         $preflightCounts = Write-PreflightReport -Results $preflight
 
         if ($Preflight) {
@@ -4104,7 +4290,7 @@ function Invoke-Restore {
     Assert-IisPresent
 
     # --- 2. IIS ------------------------------------------------------------
-    Set-NdesApplicationPool -AppPool $config.AppPool -Account $account -Password $secret
+    Set-NdesApplicationPool -AppPool $config.AppPool -Account $account -Password $secret -UseGmsa:$isGmsa
     Set-NdesApplications -Applications $config.Applications
 
     # Bundles captured before schema 3 never recorded these settings - the
@@ -4195,13 +4381,14 @@ function Invoke-Restore {
     # Two layers: the individual checks that say whether each step worked, then the
     # source-vs-target comparison that says whether the result is the same server.
     $stepFailures = Test-NdesConfiguration -ExpectedCA $caConfig -Targets $targets -Features @($config.Features) `
-        -ServiceAccountCredential $ServiceAccountCredential -ServiceAccountName $account
+        -ServiceAccountCredential $ServiceAccountCredential -ServiceAccountName $account -UseGmsa:$isGmsa
 
     $remedy = @{
         Config            = $config
         Authentication    = $capturedAuthentication
         Account           = $account
         Secret            = $secret
+        UseGmsa           = $isGmsa
         Targets           = $targets
         ServerCertificate = $serverCert
         EncryptionTemplate = $raEncryption
@@ -4735,7 +4922,7 @@ function Invoke-DriftRemediation {
             switch ($fix) {
                 'Registry' { Import-RegistryTargets -Targets $Context.Targets }
                 'ApplicationPool' {
-                    Set-NdesApplicationPool -AppPool $Context.Config.AppPool -Account $Context.Account -Password $Context.Secret
+                    Set-NdesApplicationPool -AppPool $Context.Config.AppPool -Account $Context.Account -Password $Context.Secret -UseGmsa:$Context.UseGmsa
                     $needsIisRestart = $true
                 }
                 'Applications' {
@@ -5034,7 +5221,8 @@ function Test-NdesConfiguration {
         $Targets,
         [AllowEmptyCollection()][string[]]$Features = @(),
         [System.Management.Automation.PSCredential]$ServiceAccountCredential,
-        [string]$ServiceAccountName
+        [string]$ServiceAccountName,
+        [switch]$UseGmsa
     )
 
     Write-Step 'Verifying configuration'
@@ -5203,6 +5391,11 @@ function Test-NdesConfiguration {
         $reach = Test-NetConnection -ComputerName $caHost -Port 135 -InformationLevel Quiet -WarningAction SilentlyContinue
         if ($reach) { Write-Info ("CA endpoint mapper reachable: {0}:135" -f $caHost) 'Ok' }
         else { Write-Info ("CA not reachable on 135: {0}" -f $caHost) 'Warn'; $failures++ }
+
+        if ($UseGmsa) {
+            Write-Info (('CA call as the service account: not attempted - a gMSA has no password to start a process with. ' +
+                    'To prove that identity can reach the CA, log on as it elsewhere and run: certutil -ping -config {0}') -f $ExpectedCA)
+        }
 
         foreach ($probe in @(
                 @{ Credential = $null; Label = 'this session' },

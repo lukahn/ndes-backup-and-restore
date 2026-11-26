@@ -448,6 +448,7 @@ You are prompted to confirm, each defaulting to the backed-up value:
 | Prompt | Default |
 | --- | --- |
 | Service account | `CONTOSO\svc_ndes` |
+| Is it a gMSA (no password)? | yes if the name ends in `$`, otherwise no |
 | CA configuration | `ca.contoso.com\CONTOSO-SUBCA` |
 | Server certificate template | `NDESServer` |
 | RA encryption template | MSCEP `EncryptionTemplate` (`NDESUser`) |
@@ -456,6 +457,87 @@ You are prompted to confirm, each defaulting to the backed-up value:
 
 then for the service account password, which is used only to set the app pool
 identity and is never written to disk.
+
+### gMSA instead of a user service account
+
+Right after the service account prompt, the restore asks whether that account is
+a **group Managed Service Account**:
+
+```
+Service account (domain\user) [CONTOSO\svc_ndes$]:
+Run CONTOSO\svc_ndes$ as a group Managed Service Account (no password)? [Y/n]
+```
+
+The default is **yes** when the name ends in `$` and **no** otherwise, so for a
+plain user account pressing Enter keeps the password flow exactly as it was — the
+`Get-Credential` prompt and the batch-logon check that catches a wrong password
+before anything is changed. Use `-UseGmsa` to answer yes without being asked, or
+supply `-ServiceAccountCredential` to answer no.
+
+When it is a gMSA:
+
+| | |
+| --- | --- |
+| Password | never asked for, and never written — the app pool is set to `SpecificUser` with the account name and an **empty** password, which is how WAS takes the managed-password path |
+| `IIS_IUSRS` | added by the script, same as for a user account |
+| Batch-logon check | replaced by `Test-ADServiceAccount` (skipped with a note if the ActiveDirectory module is not installed); the app pool start afterwards is the real test |
+| RA certificates | machine-context enrolment only — alternate-credential (CEP) enrolment needs a password, so `-EnrollmentPolicyUrl` is ignored with a warning |
+| CA / admin-endpoint probes "as the service account" | not attempted, because a process cannot be started as a gMSA from PowerShell; the caller-side result is still reported |
+
+Because appcmd will happily accept a set it did not apply, the app pool's
+`processModel` is read back from `applicationHost.config` afterwards and the
+restore fails loudly if the identity, the user name or the empty password did not
+stick. That check exists because the failure mode is otherwise a silent HTTP 503.
+
+Before the restore will run, the gMSA must already work on that host:
+
+```powershell
+# once per NDES server, elevated - see "What Install-ADServiceAccount does" below
+Install-ADServiceAccount -Identity svc_ndes
+Test-ADServiceAccount    -Identity svc_ndes   # must return True
+```
+
+`Install-ADServiceAccount` needs the ActiveDirectory module, so on a server
+without RSAT run it from somewhere that has it against the host, or accept the
+`Test-ADServiceAccount` "not checked" line and let the app pool start be the
+proof.
+
+Local group membership is left to you, as you asked: the script adds `IIS_IUSRS`
+and reports whether the account is in `Administrators` without changing it. The
+restore itself runs as **you**, not as the service account, so the gMSA does not
+need to be a local administrator for the roles and features to install.
+
+### What Install-ADServiceAccount does
+
+It does **not** create the account, grant it any permission, or add it to a
+group — all of that is AD work you do first (`New-ADServiceAccount`,
+`PrincipalsAllowedToRetrieveManagedPassword`). What it does is prepare **this
+host** to use an account that already exists:
+
+1. Checks that this computer is allowed to obtain the account's password —
+   `PrincipalsAllowedToRetrieveManagedPassword`, either the computer account
+   itself or a group it belongs to. If not, it fails here rather than at 3am.
+2. Contacts a domain controller and derives the current password from the
+   domain's KDS root key.
+3. Stores it locally in a machine-scoped LSA secret, so the account can be logged
+   on as on this host without anyone ever supplying a password, and so the
+   periodic domain-side roll needs no action here.
+
+After that, `LSA` can present the identity to anything that asks — a Windows
+service, a scheduled task, or an IIS application pool. That local secret is
+exactly what the SCEP app pool needs: `SpecificUser` plus an **empty** password is
+the signal to use it, which is why writing a password into the app pool breaks a
+gMSA identity.
+
+Consequences worth knowing:
+
+- It is **per host**. Every NDES server you build needs it run again.
+- It must be run **elevated**, and needs the ActiveDirectory module.
+- `Test-ADServiceAccount` verifies afterwards (returns `True`/`False` rather than
+  throwing), and `Uninstall-ADServiceAccount` removes the local secret when you
+  decommission the host.
+- It does not survive a reimage — a rebuilt server is a new host and needs it
+  again, which is why the restore checks for it before touching anything.
 
 ### All three MSCEP template values must be the wizard's
 
