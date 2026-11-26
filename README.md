@@ -490,39 +490,6 @@ Because appcmd will happily accept a set it did not apply, the app pool's
 restore fails loudly if the identity, the user name or the empty password did not
 stick. That check exists because the failure mode is otherwise a silent HTTP 503.
 
-### The SPN, and why it is registered
-
-IIS registers SPNs for a site when the pool runs as `ApplicationPoolIdentity`,
-because the identity is the machine. It does **not** do that for a custom
-identity, so a gMSA with no SPN leaves `mscep_admin` authenticating over NTLM.
-That still works — NTLM is not disabled anywhere — but anything that requires
-Kerberos fails, and a Kerberos failure falls back silently rather than erroring.
-
-So the restore registers one:
-
-```
-  [ok]   SPN registered on CONTOSO\svc_ndes$: HTTP/ndes.contoso.com
-```
-
-- The name is the **server FQDN** you confirmed earlier — the same name the
-  server certificate is issued for, so the two cannot disagree.
-- It is added with `Set-ADServiceAccount`, not `setspn.exe`, and **checked for
-  duplicates first**: an SPN present on two accounts breaks Kerberos for both,
-  and the AD cmdlets have no `-S` equivalent to catch that. If the name is
-  already on another object the restore says which one and skips it.
-- Already registered → reported and skipped, so re-running is safe.
-- Reached through a CNAME or load balancer? Add those names yourself:
-
-```powershell
-.\migration\NDESMigration.ps1 -Restore -Path <bundle> -UseGmsa `
-    -Spn HTTP/ndes-alias.contoso.com
-```
-
-Writing that attribute needs permission on the account. Domain Admin has it;
-otherwise delegate *Validated write to service principal name* (or `Write
-servicePrincipalName`) on the gMSA object. The failure is reported with that hint
-rather than left as an NTLM fallback you would not notice.
-
 The restore **runs `Install-ADServiceAccount` for you**. It happens in the gMSA
 step, before the preflight checks — so it also happens when you pass
 `-SkipPreflight`, because every check about the account depends on it:
@@ -543,7 +510,8 @@ only changes a preflight run makes, and it names them when it exits:
 
 ```
 == Preflight only
-  [warn] Changed on this host first: RSAT-AD-PowerShell, the gMSA registration. Nothing else was changed (-Preflight).
+  [warn] Changed on this host first: RSAT-AD-PowerShell, the gMSA registration, the HTTP SPN.
+         Nothing else was changed (-Preflight).
 ```
 
 If the registration fails, the restore stops before changing anything and says
@@ -596,6 +564,74 @@ Local group membership is left to you, as you asked: the script adds `IIS_IUSRS`
 and reports whether the account is in `Administrators` without changing it. The
 restore itself runs as **you**, not as the service account, so the gMSA does not
 need to be a local administrator for the roles and features to install.
+
+### The SPN, and why the account cannot set it for itself
+
+IIS registers SPNs for a site when the pool runs as `ApplicationPoolIdentity`,
+because the identity is the machine. It does **not** do that for a custom
+identity, so a gMSA with no SPN leaves `mscep_admin` authenticating over NTLM.
+That still works — NTLM is not disabled anywhere — but anything that requires
+Kerberos fails, and the failure is a silent fallback rather than an error.
+
+The gMSA *is* allowed to write its own SPN: the class grants that to the account
+itself, which is how a service running as a gMSA registers something like
+`MSSQLSvc/…` at startup.
+
+```
+Allow NT AUTHORITY\SELF    SPECIAL ACCESS for Validated write to service principal name
+Allow NT AUTHORITY\SELF    SPECIAL ACCESS for Validated write to DNS host name
+```
+
+Two things stop that helping here:
+
+- **SELF means the token presenting the write is the account.** A session running
+  as an administrator is evaluated against that administrator's own ACEs, so the
+  account holding the right grants nothing to whoever runs the restore.
+- **Nothing can run as the gMSA to exercise it.** There is no `runas` for a
+  managed account — no password to supply, and gMSAs are barred from interactive
+  logon, so a credential cannot be built for one either.
+
+A scheduled task whose principal *is* the gMSA is the one way to genuinely have it
+register its own SPN, since the task's token *is* the account. It is not worth the
+machinery when the alternative is delegating one attribute write, so the restore
+does not do it.
+
+So the SPN is registered from outside, as whoever runs the restore:
+
+```
+  [ok]   SPN registered on CONTOSO\svc_ndes$: HTTP/ndes.contoso.com
+```
+
+- The name is the **server FQDN** you confirmed earlier — the same name the
+  server certificate is issued for, so the two cannot disagree.
+- It is added with `Set-ADServiceAccount`, not `setspn.exe`, and **checked for
+  duplicates first**: an SPN present on two accounts breaks Kerberos for both,
+  and the AD cmdlets have no `-S` equivalent to catch that. If the name is
+  already on another object the restore says which one and skips it.
+- Already registered → reported and skipped, so re-running is safe.
+- Reached through a CNAME or load balancer? Add those names yourself:
+
+```powershell
+.\migration\NDESMigration.ps1 -Restore -Path <bundle> -UseGmsa `
+    -Spn HTTP/ndes-alias.contoso.com
+```
+
+Writing that attribute needs permission on the account, and **Domain Admin is not
+required** — write on `servicePrincipalName` for that one object is enough:
+
+```powershell
+dsacls "CN=svc_ndes,CN=Managed Service Accounts,DC=contoso,DC=com" `
+    /G "CONTOSO\NDES-Admins:CR f3a64788-5306-11d1-a9c5-0000f80367c1"
+```
+
+That GUID is *Validated write to service principal name*; `WP
+servicePrincipalName` is the plain property write. `dsacls <dn>` on its own shows
+what an object already grants — the SELF rows above come from the
+`msDS-GroupManagedServiceAccount` class default, not from anything the operator
+added.
+
+The failure is reported with that hint rather than left as an NTLM fallback you
+would not notice.
 
 ### What Install-ADServiceAccount does
 
