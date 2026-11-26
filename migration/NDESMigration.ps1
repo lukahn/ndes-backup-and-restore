@@ -2187,6 +2187,65 @@ function Get-AppPoolIdentity {
     catch { return $null }
 }
 
+function Clear-AppPoolPassword {
+    <#
+        Removes a stored identity password from an application pool.
+
+        Pointing a pool at a gMSA needs the password attribute to be *absent*, not
+        empty. appcmd cannot express that: '/processModel.password:' is accepted,
+        reports success, and leaves the existing value in place - so a pool that
+        previously ran as a user account keeps its password, and WAS takes the
+        explicit-credential path instead of the managed one.
+
+        IIS also encrypts whatever password it is given, so even an empty password
+        is stored as non-empty ciphertext. There is therefore no value to write that
+        means "no password": the attribute has to be removed, which means editing
+        applicationHost.config directly. Whitespace is preserved and the encoding is
+        UTF-8 without a BOM, because that is what IIS writes.
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param([Parameter(Mandatory)][string]$PoolName)
+
+    $appHost = Join-Path $env:SystemRoot 'System32\inetsrv\config\applicationHost.config'
+    if (-not (Test-Path -LiteralPath $appHost)) { return $false }
+
+    $document = New-Object System.Xml.XmlDocument
+    $document.PreserveWhitespace = $true
+    try { $document.Load($appHost) }
+    catch {
+        Write-Info ("Could not read {0}: {1}" -f $appHost, $_.Exception.Message) 'Warn'
+        return $false
+    }
+
+    $pool = $document.SelectSingleNode("/configuration/system.applicationHost/applicationPools/add[@name='$PoolName']")
+    if (-not $pool) {
+        Write-Info ("Application pool {0} is not in applicationHost.config" -f $PoolName) 'Warn'
+        return $false
+    }
+    $processModel = $pool.SelectSingleNode('processModel')
+    if (-not $processModel -or -not $processModel.HasAttribute('password')) { return $true }
+
+    if (-not $PSCmdlet.ShouldProcess($PoolName, 'Remove the stored identity password')) { return $false }
+
+    $backup = ('{0}.bak-{1}' -f $appHost, (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    Copy-Item -LiteralPath $appHost -Destination $backup -Force
+    [void]$processModel.RemoveAttribute('password')
+
+    try {
+        $settings = New-Object System.Xml.XmlWriterSettings
+        $settings.Encoding = New-Object System.Text.UTF8Encoding($false)
+        $settings.Indent = $false
+        $writer = [System.Xml.XmlWriter]::Create($appHost, $settings)
+        try { $document.Save($writer) } finally { $writer.Dispose() }
+        Write-Info 'Stored app pool password removed from applicationHost.config' 'Ok'
+        return $true
+    }
+    catch {
+        Write-Info ("Could not write {0}: {1}. Restore {2} before continuing." -f $appHost, $_.Exception.Message, $backup) 'Warn'
+        return $false
+    }
+}
+
 function Confirm-YesNo {
     <#
         A yes/no prompt with a default, for questions whose answer is not a string.
@@ -2723,8 +2782,12 @@ function Set-NdesApplicationPool {
             Invoke-AppCmd -Arguments @('set', 'apppool', ('/apppool.name:{0}' -f $AppPool.Name),
                 '/processModel.identityType:SpecificUser',
                 ('/processModel.userName:{0}' -f $Account),
-                '/processModel.password:',
                 '/processModel.idleTimeout:00:00:00') | Out-Null
+
+            # A pool that previously ran as a user account still carries that
+            # password, and appcmd will not remove it - the attribute has to go or
+            # WAS keeps using it instead of the managed credential.
+            $null = Clear-AppPoolPassword -PoolName $AppPool.Name
         }
         Write-Info ("Identity set to {0} (SpecificUser, gMSA - no password stored)" -f $Account) 'Ok'
     }
