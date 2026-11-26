@@ -63,6 +63,13 @@
     '$'. The gMSA is registered on this host with Install-ADServiceAccount before
     the preflight runs, and therefore also with -SkipPreflight.
 
+.PARAMETER Spn
+    With -Restore and a gMSA: extra service principal names to register, beyond
+    HTTP/<server FQDN>, which is always added. Use it when clients reach the
+    server through another name - a CNAME, or a load balancer address - because
+    Kerberos resolves on the name the client typed and silently falls back to
+    NTLM when there is no SPN for it.
+
 .PARAMETER CAConfig
     Override the CA configuration string (default: captured value).
 
@@ -169,6 +176,11 @@ param(
 
     [Parameter(ParameterSetName = 'Restore')]
     [switch]$UseGmsa,
+
+    # Extra SPNs to register on the gMSA, beyond HTTP/<server FQDN>. Use when
+    # clients reach the server through another name (a CNAME, a load balancer).
+    [Parameter(ParameterSetName = 'Restore')]
+    [string[]]$Spn,
 
     [Parameter(ParameterSetName = 'Restore')]
     [string]$CAConfig,
@@ -3637,6 +3649,101 @@ function Test-GmsaReady {
     }
 }
 
+function Register-NdesGmsaSpn {
+    <#
+        Registers HTTP/<name> on the gMSA, so Kerberos works for the site.
+
+        IIS registers SPNs for the machine when a pool runs as
+        ApplicationPoolIdentity, but not for a custom identity. A gMSA without an
+        SPN therefore falls back to NTLM: mscep_admin still authenticates, but
+        only with NTLM, and anything that requires Kerberos fails.
+
+        The name must be the one clients type, which is the same name the server
+        certificate is issued for. Duplicates are checked first, because an SPN on
+        two accounts breaks Kerberos for both - and unlike setspn -S there is no
+        switch that does it for us here.
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [Parameter(Mandatory)][string]$Account,
+        [Parameter(Mandatory)][string]$DnsName,
+        [string[]]$Extra = @()
+    )
+
+    if (-not (Get-Command Set-ADServiceAccount -ErrorAction SilentlyContinue)) {
+        Write-Info 'Set-ADServiceAccount is not available, so no SPN can be registered from here' 'Warn'
+        return $false
+    }
+
+    $shortName = (($Account -split '\\')[-1]).TrimEnd('$')
+    $wanted = @(@(('HTTP/{0}' -f $DnsName.ToLower())) + @($Extra | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ }) |
+        Sort-Object -Unique)
+
+    $object = $null
+    try {
+        $object = Get-ADServiceAccount -Identity $shortName -Properties ServicePrincipalNames -ErrorAction Stop
+    }
+    catch {
+        Write-Info ("Could not read {0} from the directory, so no SPN was registered: {1}" -f $Account, $_.Exception.Message) 'Warn'
+        return $false
+    }
+    $current = @($object.ServicePrincipalNames | Where-Object { $_ })
+
+    $toAdd = @()
+    foreach ($entry in $wanted) {
+        if ($current -contains $entry) { Write-Info ("SPN already registered: {0}" -f $entry) 'Ok'; continue }
+
+        # One SPN on two accounts is worse than none: the client asks for a ticket
+        # for that name and gets whichever account the KDC picks.
+        $elsewhere = @()
+        try {
+            $elsewhere = @(Get-ADObject -Filter ("servicePrincipalName -eq '{0}'" -f $entry) -Properties servicePrincipalName -ErrorAction Stop |
+                Where-Object { $_.DistinguishedName -ne $object.DistinguishedName })
+        }
+        catch { Write-Info ("Could not check {0} for duplicates: {1}" -f $entry, $_.Exception.Message) 'Warn' }
+
+        if ($elsewhere.Count -gt 0) {
+            Write-Info ("SPN {0} is already on {1} - not adding it, because a duplicate SPN breaks Kerberos for both accounts. Remove it there first, or use a name only this server answers on." -f `
+                    $entry, (($elsewhere | ForEach-Object { $_.DistinguishedName }) -join ', ')) 'Warn'
+            continue
+        }
+        $toAdd += $entry
+    }
+
+    if ($toAdd.Count -eq 0) { return $false }
+
+    if (-not $PSCmdlet.ShouldProcess($Account, ('Register SPN {0}' -f ($toAdd -join ', ')))) {
+        Write-Info ("Would register on {0}: {1}" -f $Account, ($toAdd -join ', ')) 'Warn'
+        return $false
+    }
+
+    try {
+        Set-ADServiceAccount -Identity $shortName -ServicePrincipalNames @{ Add = $toAdd } -ErrorAction Stop
+    }
+    catch {
+        Write-Info ("Could not register {0} on {1}: {2}" -f ($toAdd -join ', '), $Account, $_.Exception.Message) 'Warn'
+        Write-Info 'This needs write access to servicePrincipalName on the account: delegate it with dsacls, or run setspn -S by hand.' 'Warn'
+        return $false
+    }
+
+    # Read it back: the attribute is multi-valued and a partial write shows up
+    # only when Kerberos quietly falls back to NTLM.
+    try {
+        $after = @((Get-ADServiceAccount -Identity $shortName -Properties ServicePrincipalNames -ErrorAction Stop).ServicePrincipalNames)
+        $missing = @($toAdd | Where-Object { $after -notcontains $_ })
+        if ($missing.Count -eq 0) {
+            Write-Info ("SPN registered on {0}: {1}" -f $Account, ($toAdd -join ', ')) 'Ok'
+            return $true
+        }
+        Write-Info ("SPN write did not stick: {0}" -f ($missing -join ', ')) 'Warn'
+        return $false
+    }
+    catch {
+        Write-Info ("SPN written but could not be read back: {0}" -f $_.Exception.Message) 'Warn'
+        return $true
+    }
+}
+
 function Install-NdesAdModule {
     <#
         Makes the ActiveDirectory module available on this server.
@@ -4328,6 +4435,12 @@ function Invoke-Restore {
                 $account, $gmsaReady.Detail
         }
         Write-Info ("Service account is a gMSA: {0} - {1}" -f $account, $gmsaReady.Detail) $(if ($gmsaReady.State -eq 'Ready') { 'Ok' } else { 'Warn' })
+
+        # Kerberos for the site name. IIS does not do this for a custom identity,
+        # and without it mscep_admin authenticates over NTLM only.
+        if (Register-NdesGmsaSpn -Account $account -DnsName $dnsName -Extra $Spn) {
+            $prereqChanges += 'the HTTP SPN'
+        }
     }
     else {
         if (-not $ServiceAccountCredential) {

@@ -483,11 +483,45 @@ When it is a gMSA:
 | Batch-logon check | replaced by `Test-ADServiceAccount` (skipped with a note if the ActiveDirectory module is not installed); the app pool start afterwards is the real test |
 | RA certificates | machine-context enrolment only — alternate-credential (CEP) enrolment needs a password, so `-EnrollmentPolicyUrl` is ignored with a warning |
 | CA / admin-endpoint probes "as the service account" | not attempted, because a process cannot be started as a gMSA from PowerShell; the caller-side result is still reported |
+| SPN | `HTTP/<server FQDN>` registered on the account, so the site authenticates with Kerberos — see below |
 
 Because appcmd will happily accept a set it did not apply, the app pool's
 `processModel` is read back from `applicationHost.config` afterwards and the
 restore fails loudly if the identity, the user name or the empty password did not
 stick. That check exists because the failure mode is otherwise a silent HTTP 503.
+
+### The SPN, and why it is registered
+
+IIS registers SPNs for a site when the pool runs as `ApplicationPoolIdentity`,
+because the identity is the machine. It does **not** do that for a custom
+identity, so a gMSA with no SPN leaves `mscep_admin` authenticating over NTLM.
+That still works — NTLM is not disabled anywhere — but anything that requires
+Kerberos fails, and a Kerberos failure falls back silently rather than erroring.
+
+So the restore registers one:
+
+```
+  [ok]   SPN registered on CONTOSO\svc_ndes$: HTTP/ndes.contoso.com
+```
+
+- The name is the **server FQDN** you confirmed earlier — the same name the
+  server certificate is issued for, so the two cannot disagree.
+- It is added with `Set-ADServiceAccount`, not `setspn.exe`, and **checked for
+  duplicates first**: an SPN present on two accounts breaks Kerberos for both,
+  and the AD cmdlets have no `-S` equivalent to catch that. If the name is
+  already on another object the restore says which one and skips it.
+- Already registered → reported and skipped, so re-running is safe.
+- Reached through a CNAME or load balancer? Add those names yourself:
+
+```powershell
+.\migration\NDESMigration.ps1 -Restore -Path <bundle> -UseGmsa `
+    -Spn HTTP/ndes-alias.contoso.com
+```
+
+Writing that attribute needs permission on the account. Domain Admin has it;
+otherwise delegate *Validated write to service principal name* (or `Write
+servicePrincipalName`) on the gMSA object. The failure is reported with that hint
+rather than left as an NTLM fallback you would not notice.
 
 The restore **runs `Install-ADServiceAccount` for you**. It happens in the gMSA
 step, before the preflight checks — so it also happens when you pass
