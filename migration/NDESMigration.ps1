@@ -5126,14 +5126,20 @@ function Compare-NdesTargetToBundle {
     $admin = Get-NdesEndpointResponse -Uri ('http://localhost{0}/' -f $script:AppPaths[1]) -UseDefaultCredentials
     $adminTarget = 'no response'
     $adminStatus = 'missing'
+    $adminFix = $null
     if ($admin) {
-        if ($admin.IsExecutable) { $adminTarget = 'mscep.dll served as a file'; $adminStatus = 'DIFFERENT' }
+        # The status code alone cannot tell these apart: the refusal page ("You do
+        # not have sufficient permission to enroll with SCEP") is also HTTP 200.
+        # The password page is the one that carries the word, so say which it was
+        # instead of printing a bare 200 that looks identical to the source.
+        if ($admin.IsExecutable) { $adminTarget = 'mscep.dll served as a file'; $adminStatus = 'DIFFERENT'; $adminFix = 'IIS' }
         elseif ($admin.StatusCode -eq 200 -and $admin.Text -match '(?i)password') { $adminTarget = 'HTTP 200 password page'; $adminStatus = 'same' }
-        else { $adminTarget = ('HTTP {0}' -f $admin.StatusCode); $adminStatus = 'DIFFERENT' }
+        elseif ($admin.StatusCode -eq 200) { $adminTarget = 'HTTP 200, no password page (NDES refused)'; $adminStatus = 'DIFFERENT' }
+        else { $adminTarget = ('HTTP {0}' -f $admin.StatusCode); $adminStatus = 'DIFFERENT'; $adminFix = 'IIS' }
     }
     $rows.Add([pscustomobject]@{
             Area = 'Endpoint'; Item = '/CertSrv/mscep_admin authenticated'
-            Source = 'HTTP 200 password page'; Target = $adminTarget; Status = $adminStatus; Fix = 'IIS'
+            Source = 'HTTP 200 password page'; Target = $adminTarget; Status = $adminStatus; Fix = $adminFix
         })
 
     # --- report -------------------------------------------------------------
